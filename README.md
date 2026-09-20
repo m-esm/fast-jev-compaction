@@ -311,6 +311,45 @@ To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
 
+## Observability
+
+Plugin-triggered attempts skip when Jev cannot help, leaving the transcript
+intact and raising the auto trigger when no context was freed. Manual and
+engine-triggered compactions still fall back to the built-in summary.
+Precompute writes diagnostics without a toast. Installed compactions reset
+the cooldown. Removed calls leave an explicit marker beside the narration.
+
+Version 0.5.0 writes one JSON file per `session.compact` dispatch, including
+precompute, to `~/.claude/cache/fast-jev-compaction/events`. Set the plugin
+option `eventsDir` to change the directory or `events: false` to disable it.
+Files are named `<UTC timestamp>-<session8>-<trigger>.json`. A separate
+`-auto.json` observation records the before/after context percentage and
+trigger escalation for each plugin auto-compaction attempt.
+
+Events contain outcome and reason codes, thresholds, character/message counts,
+per-tool actions, score deciles, request/retry counts and timings. They never
+contain message text, tool inputs/outputs, transcript paths or API keys.
+Error reasons use fixed diagnostic text and HTTP status codes, never response
+bodies. A logging failure does not stop compaction. When Jev ran but its
+reduction was too small, its counts and scores describe that rejected proposal.
+
+```sh
+node scripts/report.mjs --last 20
+node scripts/report.mjs --dir tests/fixtures/events --session 1234 --json
+npx tsx scripts/replay.ts tests/fixtures/transcript.jsonl
+npx tsx scripts/replay.ts /path/to/transcript.jsonl --until-boundary 2
+```
+
+Report supports `--days N` and skips unreadable or invalid event files. It
+prints dispatch totals, median Jev reduction, per-tool actions and score
+histograms; auto observations are counted separately to avoid duplication.
+Replay is offline by default, reports only counts and a pre-check verdict, and
+uses the default plugin thresholds and newest-message pinning. It stops before
+the first compaction boundary unless `--until-boundary N` selects another.
+`--ask` explicitly opts into a real Jev request using `TYPESAFE_API_KEY` from
+the environment; it prints the result summary and aggregates. The `report`
+and `replay` npm scripts expose the same commands.
+
 ## Development
 
 ```sh

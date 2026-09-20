@@ -66,6 +66,8 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
+| `events` | `true` |
+| `eventsDir` | `$HOME/.claude/cache/fast-jev-compaction/events` |
 
 `redact` masks personal data and secrets in the state before it leaves the
 machine; the messages the hook hands back are always the verbatim originals.
@@ -93,6 +95,34 @@ reduction, per-reason counts, state size and request count; a per-call
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
+
+## Compaction triggers and diagnostics
+
+| Trigger | When Jev succeeds | When Jev cannot help | Toast |
+| --- | --- | --- | --- |
+| `manual` | Install pruned messages | Delegate to the built-in summary | Yes |
+| `auto` (engine) | Install pruned messages | Delegate to the built-in summary | Yes |
+| `plugin` | Install pruned messages | Return `{ skip }`, keep the transcript | Yes |
+| `precompute` | Return candidate messages for later | Delegate to built-in precomputation | No |
+
+The fallback rules cover insufficient removable context, insufficient actual
+reduction, a missing key and errors. A skipped plugin attempt counts toward
+the auto cap and cooldown and raises the trigger because it frees zero context
+points. Every installed compaction resets cooldown, including manual and
+engine compactions. Precompute does not reset it.
+
+Network failures, HTTP 429 and HTTP 5xx get one retry after 500 ms through the
+engine clock. Other HTTP errors and malformed responses are not retried.
+Dropped calls leave a grouped text marker listing tool names and counts;
+that marker contributes to the resulting character count.
+
+With `events` enabled, each dispatch writes a separate content-free JSON file,
+including silent precompute and skipped attempts. Auto-compaction also writes
+an `-auto.json` observation with context percentages and the trigger/cap state.
+Writes use the engine filesystem, which creates missing parent directories.
+Write failures log one diagnostic line and do not interrupt compaction.
+See the root [Observability](../README.md#observability) section for the event
+fields, privacy rule, report and offline replay commands.
 
 ## Scope and caveat
 
