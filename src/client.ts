@@ -1,4 +1,5 @@
 import { buildJevRequest, parseJevResponse } from './request.js';
+import { JevNetworkError, withRetry } from './retry.js';
 import type { JevAsker, JevQuestions, JevResponse, JevState } from './types.js';
 
 export interface JevClientOptions {
@@ -27,17 +28,31 @@ export class JevClient implements JevAsker {
   }
 
   async ask(state: JevState, questions: JevQuestions): Promise<JevResponse> {
+    return withRetry({ ask: (s, q) => this.askOnce(s, q) }, {
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    }).ask(state, questions);
+  }
+
+  private async askOnce(state: JevState, questions: JevQuestions): Promise<JevResponse> {
     if (!this.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
     const request = buildJevRequest(
       { apiKey: this.apiKey, model: this.model, baseUrl: this.baseUrl },
       state,
       questions,
     );
-    const response = await this.fetcher(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
-    return parseJevResponse(response.status, response.ok, await response.text());
+    let response: Response;
+    let text: string;
+    try {
+      response = await this.fetcher(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+      });
+      text = await response.text();
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      throw new JevNetworkError(error);
+    }
+    return parseJevResponse(response.status, response.ok, text);
   }
 }

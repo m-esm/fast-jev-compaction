@@ -3,6 +3,13 @@ import type { JevAnswer, JevQuestions, JevResponse, JevState } from './types.js'
 export const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';
 export const DEFAULT_MODEL = 'jev-latest';
 
+export class JevHttpError extends Error {
+  constructor(public readonly status: number, text: string) {
+    super(`Jev request failed (${status}): ${text.slice(0, 200)}`);
+    this.name = 'JevHttpError';
+  }
+}
+
 export interface JevRequest {
   url: string;
   method: 'POST';
@@ -42,7 +49,7 @@ export function parseJevResponse(
   text: string,
 ): JevResponse {
   if (!ok) {
-    throw new Error(`Jev request failed (${status}): ${text.slice(0, 200)}`);
+    throw new JevHttpError(status, text);
   }
   let parsed: unknown;
   try {
