@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model, with PII masking before anything leaves the machine.",
   "type": "module",
   "license": "MIT",
