@@ -120,6 +120,18 @@
       "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
       "default": 300
     },
+    "imageTools": {
+      "type": "string",
+      "title": "Image tools (matched by name)",
+      "description": "Comma-separated, case-insensitive substrings of tool names assumed to return an image the plugin cannot see (MCP render and screenshot tools). A tool is matched by name only. An empty string turns the assumption off.",
+      "default": "screenshot,render,capture,thumb,snapshot,image"
+    },
+    "assumedImageChars": {
+      "type": "number",
+      "title": "Assumed image weight",
+      "description": "Characters charged for one image of a tool matched by imageTools. An assumption, not a measurement: the plugin never sees those bytes.",
+      "default": 6000
+    },
     "model": {
       "type": "string",
       "title": "Jev model",

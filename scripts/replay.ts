@@ -1,11 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compact, droppableRatio } from '../src/compact.js';
+import { compact, droppableRatio, resolveOptions } from '../src/compact.js';
 import { JevClient } from '../src/client.js';
 import { buildCompactionEvent } from '../src/events.js';
 import { collectToolCalls } from '../src/state.js';
-import { binaryPayloadChars } from '../src/payload.js';
+import { hiddenChars } from '../src/payload.js';
 import { resolveHookConfig, summarize } from '../hooks/fast-jev.js';
 import type { Message } from '../src/types.js';
 
@@ -52,7 +52,8 @@ export function parseTranscript(jsonl: string, untilBoundary = 1) {
           ...(result === undefined ? {} : { result }) });
         const base64Chars = imageChars(block.content);
         images.inToolResults += base64Chars;
-        images.invisibleInToolResults += Math.max(0, base64Chars - binaryPayloadChars(result));
+        // Real bytes against what the plugin measures. The tool name is not known here, and an assumed weight is no measurement.
+        images.invisibleInToolResults += Math.max(0, base64Chars - hiddenChars({ tool: '', result }).binary);
       }
     }
     if (role === 'user') images.inUserMessages += imageChars(content);
@@ -79,15 +80,26 @@ export function analyzeTranscript(parsed: ReturnType<typeof parseTranscript>) {
     for (const result of message.toolResults ?? []) chars.toolResultText += result.text.length;
   }
   const byTool: Record<string, { candidates: number; resultChars: number }> = Object.create(null);
-  for (const call of collectToolCalls(parsed.messages, config.preserveRecentMessages ?? 6)) {
+  const resolved = resolveOptions(config);
+  for (const call of collectToolCalls(parsed.messages, resolved.preserveRecentMessages, resolved)) {
     if (call.pinned) continue;
     const tool = byTool[call.tool] ??= { candidates: 0, resultChars: 0 };
     tool.candidates += 1;
     tool.resultChars += call.resultChars;
   }
   const ceilingRatio = droppableRatio(parsed.messages, config);
-  const payloadChars = collectToolCalls(parsed.messages, 0).reduce((sum, call) => sum + call.payloadChars, 0);
-  return { config, chars, byTool, ceilingRatio, payloadChars, minReductionRatio: config.minReductionRatio,
+  const ceilingRatioWithoutAssumption = droppableRatio(parsed.messages, { ...config, imageTools: [] });
+  const all = collectToolCalls(parsed.messages, 0, resolved);
+  const payloadChars = all.reduce((sum, call) => sum + call.payloadChars, 0);
+  // Every call charged the assumed weight, pinned ones included: matched by tool name, nothing else.
+  const assumedImages = { tools: Object.create(null) as Record<string, number>, calls: 0, chars: 0, charsEach: resolved.assumedImageChars };
+  for (const call of all) {
+    if (call.assumedChars === 0) continue;
+    assumedImages.tools[call.tool] = (assumedImages.tools[call.tool] ?? 0) + 1;
+    assumedImages.calls += 1;
+    assumedImages.chars += call.assumedChars;
+  }
+  return { config, chars, byTool, ceilingRatio, ceilingRatioWithoutAssumption, assumedImages, payloadChars, minReductionRatio: config.minReductionRatio,
     verdict: ceilingRatio < config.minReductionRatio ? 'ceiling_below_min: plugin skips; manual/auto fall back' : 'eligible: Jev would be asked if an API key is configured' };
 }
 
@@ -99,7 +111,10 @@ export function formatReplay(parsed: ReturnType<typeof parseTranscript>): string
     `Base64 image chars outside model-facing text: in tool results ${parsed.images.inToolResults}; in user messages ${parsed.images.inUserMessages}`,
     `Stored binary payload chars visible to the plugin: ${analysis.payloadChars}`,
     `Base64 image chars the plugin cannot see: in tool results ${parsed.images.invisibleInToolResults}; in user messages ${parsed.images.inUserMessages}`,
+    `Tools matched by name as returning an image (imageTools): ${JSON.stringify(analysis.assumedImages.tools)}`,
+    `Assumed image weight (an assumption, not a measurement): ${analysis.assumedImages.calls} result(s) x ${analysis.assumedImages.charsEach} chars = ${analysis.assumedImages.chars}`,
     `droppableRatio: ${analysis.ceilingRatio.toFixed(4)}; configured minimum: ${analysis.minReductionRatio}`,
+    `droppableRatio without the image assumption: ${analysis.ceilingRatioWithoutAssumption.toFixed(4)}; with it: ${analysis.ceilingRatio.toFixed(4)}`,
     `Candidates per tool: ${JSON.stringify(analysis.byTool)}`,
     `Verdict: ${analysis.verdict}`,
     `Invalid JSON rows skipped: ${parsed.invalidRows}`,
@@ -142,6 +157,7 @@ export async function main(args = process.argv.slice(2), print: (text: string) =
   print(`Per-tool actions: ${JSON.stringify(event.byTool)}`);
   print(`Score histograms: ${JSON.stringify(event.scores)}`);
   print(`Binary chars: ${JSON.stringify(event.binaryChars)}`);
+  print(`Assumed images (matched by tool name, assumed weight): ${JSON.stringify(event.assumedImages)}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

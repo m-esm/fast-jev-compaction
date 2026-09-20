@@ -36,3 +36,77 @@ export function binaryPayloadChars(result: unknown, modelText = ''): number {
   }
   return walk(result, 0);
 }
+
+/**
+ * Case-insensitive substrings of tool names taken to return an image. Nothing a
+ * hook can see identifies such a result, so the name is all there is to go on.
+ */
+export const DEFAULT_IMAGE_TOOLS: readonly string[] = [
+  'screenshot',
+  'render',
+  'capture',
+  'thumb',
+  'snapshot',
+  'image',
+];
+
+/** ASSUMED weight of one such image, in the char units everything else uses. */
+export const DEFAULT_ASSUMED_IMAGE_CHARS = 6000;
+
+/**
+ * Leading part of every note left where an image was dropped without being
+ * measured. A result whose text carries it has no image left, so it is never
+ * charged or rewritten a second time.
+ */
+export const IMAGE_DROP_MARK = '[fast-jev-compaction dropped any image attached to this tool result';
+
+/** The note for a result dropped because its tool name matched `imageTools`. */
+export const IMAGE_DROP_NOTE = `${IMAGE_DROP_MARK} (tool name matched imageTools); re-run the tool if needed]`;
+
+/** The note for a kept result whose message had to be rebuilt for a sibling. */
+export const IMAGE_SIBLING_NOTE = `${IMAGE_DROP_MARK} (its message was rebuilt to compact another tool result); re-run the tool if needed]`;
+
+export interface HiddenCharsOptions {
+  /** Case-insensitive substrings of tool names. Empty disables the assumption. */
+  imageTools: readonly string[];
+  /** Assumed weight of one image. Not a measurement. */
+  assumedImageChars: number;
+}
+
+export const DEFAULT_HIDDEN_CHARS_OPTIONS: HiddenCharsOptions = {
+  imageTools: DEFAULT_IMAGE_TOOLS,
+  assumedImageChars: DEFAULT_ASSUMED_IMAGE_CHARS,
+};
+
+/** True when the tool name contains one of `imageTools`, whatever the case. */
+export function matchesImageTool(tool: string, imageTools: readonly string[]): boolean {
+  const name = tool.toLowerCase();
+  return imageTools.some((part) => {
+    const needle = part.trim().toLowerCase();
+    // An empty entry would match every tool.
+    return needle.length > 0 && name.includes(needle);
+  });
+}
+
+/**
+ * What one tool result weighs beyond its text. `binary` is measured from the
+ * stored record. `assumed` is a guess, charged only when nothing was measured,
+ * the tool name matches `imageTools`, and the text does not already say the
+ * image was dropped. This is the one place it is decided: the char totals
+ * before and after a compaction and the candidate list all come through here.
+ */
+export function hiddenChars(
+  call: { tool: string; result?: unknown; text?: string },
+  options: HiddenCharsOptions = DEFAULT_HIDDEN_CHARS_OPTIONS,
+): { binary: number; assumed: number } {
+  const text = call.text ?? '';
+  const binary = binaryPayloadChars(call.result, text);
+  const assumed =
+    binary === 0 &&
+    options.assumedImageChars > 0 &&
+    !text.includes(IMAGE_DROP_MARK) &&
+    matchesImageTool(call.tool, options.imageTools)
+      ? options.assumedImageChars
+      : 0;
+  return { binary, assumed };
+}

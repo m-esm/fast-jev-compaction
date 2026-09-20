@@ -134,6 +134,8 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `imageTools` | `screenshot`, `render`, `capture`, `thumb`, `snapshot`, `image` | Case-insensitive substrings of tool names assumed to return an image the plugin cannot see. Matched by name only. `[]` turns it off (plugin option: a comma-separated string, empty to turn it off) |
+| `assumedImageChars` | `6000` | Weight charged for one such image, in the same chars as everything else. An assumption, not a measurement |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts (including `protected`), the distinct values masked
@@ -225,8 +227,26 @@ Four guards, all in the hook:
 ## Limitations
 
 - Stored image payloads in native tool records can be measured and removed. MCP
-  tools do not store image bytes in `result`, only their text, so those images
-  remain invisible to the plugin. User-message images also remain invisible.
+  tools do not store image bytes in `result`, only their text, so the plugin
+  never sees those images. It guesses instead: a tool whose name contains one of
+  `imageTools` is taken to have returned one image of `assumedImageChars` chars.
+  The match is by tool name only and the weight is an assumption. A matching
+  tool that returned no image is still charged (the ceiling and the reported
+  reduction then read too high), and an image tool with an unlisted name is
+  still missed. Set `imageTools` for the tools you use.
+- When Jev drops such a result, both sides of the pair are rebuilt even though
+  the text is short, because a message only loses its images when the engine
+  rebuilds it. The result ends with
+  `[fast-jev-compaction dropped any image attached to this tool result (tool name matched imageTools); re-run the tool if needed]`,
+  and a result carrying that note is never charged or rewritten again.
+- The engine rebuilds a message as a whole. A user message holding several tool
+  results loses every image in it as soon as one result is rewritten, including
+  the image of a sibling Jev scored `keep`. The plugin does not prevent that. It
+  appends a note to that sibling (on the tool-use side too when that message is
+  being rebuilt anyway), so the transcript never loses an image silently. A
+  sibling whose result sits in another, untouched message keeps its image and
+  gets no note.
+- Images pasted into user messages stay invisible and are never touched.
 - Only tool calls and results are candidates; text messages are never removed
   or shortened in the output (they are only abridged in the state Jev sees).
 - Masking is pattern-based. It catches shapes, not meaning: a person's name, a
@@ -329,8 +349,10 @@ trigger escalation for each plugin auto-compaction attempt.
 Events contain outcome and reason codes, thresholds, character/message counts,
 per-tool actions, score deciles, request/retry counts and timings. They never
 contain message text, tool inputs/outputs, transcript paths or API keys.
-Error reasons use fixed diagnostic text and HTTP status codes, never response
-bodies. A logging failure does not stop compaction. When Jev ran but its
+Since 0.5.2 `assumedImages` (`calls`, `charsBefore`, `charsRemoved`) counts the
+results charged by tool name; its chars are the configured assumption, not
+measured bytes. Error reasons use fixed diagnostic text and HTTP status codes,
+never response bodies. A logging failure does not stop compaction. When Jev ran but its
 reduction was too small, its counts and scores describe that rejected proposal.
 
 ```sh
@@ -338,13 +360,16 @@ node scripts/report.mjs --last 20
 node scripts/report.mjs --dir tests/fixtures/events --session 1234 --json
 npx tsx scripts/replay.ts tests/fixtures/transcript.jsonl
 npx tsx scripts/replay.ts /path/to/transcript.jsonl --until-boundary 2
+npx tsx scripts/replay.ts tests/fixtures/transcript-mcp-images.jsonl
 ```
 
 Report supports `--days N` and skips unreadable or invalid event files. It
 prints dispatch totals, median Jev reduction, per-tool actions and score
 histograms; auto observations are counted separately to avoid duplication.
 Replay is offline by default, reports only counts and a pre-check verdict, and
-uses the default plugin thresholds and newest-message pinning. It stops before
+uses the default plugin thresholds and newest-message pinning. It lists the
+tools matched by `imageTools` with their counts, the assumed weight, and the
+ceiling both with and without that assumption. It stops before
 the first compaction boundary unless `--until-boundary N` selects another.
 `--ask` explicitly opts into a real Jev request using `TYPESAFE_API_KEY` from
 the environment; it prints the result summary and aggregates. The `report`
