@@ -20,11 +20,13 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit && npm run typecheck:hooks",
+    "typecheck": "tsc --noEmit && npm run typecheck:hooks && npm run typecheck:replay",
     "test": "vitest run",
     "demo": "tsx examples/demo.ts",
     "report": "node scripts/report.mjs",
+    "replay": "tsx scripts/replay.ts",
     "typecheck:hooks": "tsc -p tsconfig.hooks.json",
+    "typecheck:replay": "tsc --noEmit --target es2022 --module nodenext --strict --skipLibCheck scripts/replay.ts types/claude-code.d.ts",
     "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
   },
   "devDependencies": {
