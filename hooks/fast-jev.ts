@@ -549,7 +549,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
         reasonCode = 'error';
         failure = error;
       }
-      notify($, `${fallbackLabel} (${eventReason(reasonCode, failure)}${result ? `; ${summarize(result)}` : ''})`, event.trigger === 'precompute');
+      // A plugin-triggered skip is something nobody asked for: log it, do not toast.
+      notify($, `${fallbackLabel} (${eventReason(reasonCode, failure)}${result ? `; ${summarize(result)}` : ''})`,
+        event.trigger === 'precompute' || event.trigger === 'plugin');
       if (event.trigger === 'plugin') return { skip: reasonCode };
       // Delegate once, outside the Jev catch: a core failure is not a Jev retry.
       try {
