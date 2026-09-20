@@ -243,11 +243,8 @@ export function applyDecisions(
       .map((tool) => {
         if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
         const payloadChars = payloads.get(tool.tool_use_id) ?? 0;
-        const text = payloadChars > 0 ? removedPayloadText(tool.text ?? '', payloadChars) : truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-        );
+        const truncated = truncatedResultText(tool.text ?? '', tool.isError ?? false, headChars);
+        const text = payloadChars > 0 ? removedPayloadText(truncated, payloadChars) : truncated;
         if (payloadChars === 0 && (tool.text ?? '') === text) return tool;
         const copy: ToolUse = {
           tool_use_id: tool.tool_use_id,
@@ -263,7 +260,8 @@ export function applyDecisions(
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
         const payloadChars = payloads.get(result.tool_use_id) ?? 0;
-        const text = payloadChars > 0 ? removedPayloadText(result.text, payloadChars) : truncatedResultText(result.text, result.isError ?? false, headChars);
+        const truncated = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const text = payloadChars > 0 ? removedPayloadText(truncated, payloadChars) : truncated;
         return payloadChars === 0 && text === result.text
           ? result
           : {
@@ -308,21 +306,21 @@ export function applyDecisions(
 /** Characters of text, tool input and tool output a message holds. */
 export function messageChars(message: Message, payloads = new Map<string, number>()): number {
   let total = message.text.length + binaryPayloadChars(message.result);
-  const countPayload = (id: string, result: unknown) => {
-    const size = binaryPayloadChars(result);
+  const countPayload = (id: string, result: unknown, modelText = '') => {
+    const size = binaryPayloadChars(result, modelText);
     const counted = payloads.get(id) ?? 0;
     payloads.set(id, Math.max(counted, size));
     return Math.max(0, size - counted);
   };
   for (const tool of message.toolUses) {
-    total += countPayload(tool.tool_use_id, tool.result);
+    total += countPayload(tool.tool_use_id, tool.result, tool.text ?? '');
     try {
       total += JSON.stringify(tool.input).length;
     } catch {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) total += result.text.length + countPayload(result.tool_use_id, result.result);
+  for (const result of message.toolResults ?? []) total += result.text.length + countPayload(result.tool_use_id, result.result, result.text);
   return total;
 }
 

@@ -6,7 +6,7 @@ import { buildCompactionEvent } from '../src/events.js';
 import { toSessionMessages } from '../hooks/fast-jev.js';
 import type { Message } from '../src/types.js';
 
-const bytes = 'QUJD'.repeat(2500);
+const bytes = 'iVBORw0K'.repeat(1250);
 const stored = { type: 'image', file: { base64: bytes } };
 function transcript(): (Message & { handle: string })[] {
   return [
@@ -19,9 +19,9 @@ function transcript(): (Message & { handle: string })[] {
 it('counts only long base64-like strings within four levels', () => {
   expect(binaryPayloadChars(stored)).toBe(10000);
   expect(binaryPayloadChars('A'.repeat(4096))).toBe(0);
-  expect(binaryPayloadChars('A'.repeat(4097))).toBe(4097);
+  expect(binaryPayloadChars(bytes.slice(0, 4097))).toBe(4097);
   expect(binaryPayloadChars(`!${bytes}`)).toBe(0);
-  expect(binaryPayloadChars(`${'A'.repeat(256)}!${bytes}`)).toBe(10257);
+  expect(binaryPayloadChars(`${bytes.slice(0, 256)}!${bytes}`)).toBe(0);
   expect(binaryPayloadChars({ a: { b: { c: { d: bytes } } } })).toBe(10000);
   expect(binaryPayloadChars({ a: { b: { c: { d: { e: bytes } } } } })).toBe(0);
   expect(binaryPayloadChars([stored, stored])).toBe(20000);
@@ -69,4 +69,30 @@ it('keeps pinned or scored-kept images intact', async () => {
     expect(result.messages[2]).toBe(messages[2]);
     expect(result.stats.charsAfter).toBe(result.stats.charsBefore);
   }
+});
+
+it('does not mistake plain tool output for a binary payload', () => {
+  const seq = Array.from({ length: 3000 }, (_, i) => String(i + 1)).join('\n');
+  // `seq 1 3000`, as Bash stores it: digits and newlines, no letters at all.
+  expect(binaryPayloadChars({ stdout: seq, stderr: '' })).toBe(0);
+  expect(binaryPayloadChars('A'.repeat(5000))).toBe(0);
+  expect(binaryPayloadChars('deadbeef0123'.repeat(500))).toBe(0);
+  // A stored copy of what the model read is text already measured, whatever it looks like.
+  expect(binaryPayloadChars({ stdout: bytes }, bytes)).toBe(0);
+  expect(binaryPayloadChars({ file: { base64: bytes } }, 'a caption the tool returned with it')).toBe(10000);
+});
+
+it('truncates long text and notes the payload when a result carries both', async () => {
+  const text = 'line of ordinary tool output\n'.repeat(200);
+  const messages: Message[] = [
+    { role: 'user', text: 'start', toolUses: [] },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'x', tool: 'Read', input: {}, text, result: stored }] },
+    { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'x', text, result: stored, isError: false }] },
+  ];
+  const result = await compact(messages, { ask: async () => ({ answers: { call_t1: { noul: 0.9 }, result_t1: { noul: 0 } } }) }, { preserveRecentMessages: 0 });
+  const out = result.messages[2]!.toolResults![0]!.text;
+  expect(out.startsWith(text.slice(0, 300))).toBe(true);
+  expect(out).toContain('truncated');
+  expect(out).toContain('binary payload');
+  expect(out.length).toBeLessThan(700);
 });

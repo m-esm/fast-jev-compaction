@@ -88,7 +88,10 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
-        payloadChars: Math.max(binaryPayloadChars(tool.result), binaryPayloadChars(found.result.result)),
+        payloadChars: Math.max(
+          binaryPayloadChars(tool.result, found.result.text),
+          binaryPayloadChars(found.result.result, found.result.text),
+        ),
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
