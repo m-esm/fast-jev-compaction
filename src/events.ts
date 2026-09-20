@@ -34,11 +34,6 @@ export interface CompactionEvent {
   jev?: { requests: number; retries: number; ms: number };
   totalMs: number;
   binaryChars: { before: number; removed: number };
-  /**
-   * Images assumed from a tool name matching `imageTools`. The chars are the
-   * configured assumption times the calls, never a measurement.
-   */
-  assumedImages: { calls: number; charsBefore: number; charsRemoved: number };
   auto?: { trigger: number; compactions: number; disabledReason?: string };
 }
 
@@ -94,14 +89,7 @@ export interface EventInput {
 /** Explicit projection only. Transcripts, inputs, outputs and exceptions never enter the event. */
 export function buildCompactionEvent(input: EventInput): CompactionEvent {
   const options = resolveOptions(input.options);
-  const calls = collectToolCalls(input.messages, options.preserveRecentMessages, options);
-  const assumed = (list: readonly { assumedChars: number }[]): number =>
-    list.reduce((sum, call) => sum + call.assumedChars, 0);
-  const assumedBefore = assumed(calls);
-  // What is left after counts kept siblings that lost their image to a rebuild too.
-  const assumedAfter = input.result
-    ? assumed(collectToolCalls(input.result.messages, options.preserveRecentMessages, options))
-    : assumedBefore;
+  const calls = collectToolCalls(input.messages, options.preserveRecentMessages);
   const decisions = new Map(input.result?.decisions.map((d) => [d.id, d]));
   const byTool: Record<string, ToolTotals> = Object.create(null);
   for (const call of calls) {
@@ -120,15 +108,10 @@ export function buildCompactionEvent(input: EventInput): CompactionEvent {
     ceilingRatio: input.ceilingRatio, minReductionRatio: input.minReductionRatio,
     thresholds: { keepResult: options.keepResultThreshold, keepCall: options.keepCallThreshold },
     messagesBefore: input.messages.length,
-    charsBefore: transcriptChars(input.messages, options),
+    charsBefore: transcriptChars(input.messages),
     binaryChars: {
       before: calls.reduce((sum, call) => sum + call.payloadChars, 0),
       removed: calls.reduce((sum, call) => sum + (decisions.has(call.id) && decisions.get(call.id)?.action !== 'keep' ? call.payloadChars : 0), 0),
-    },
-    assumedImages: {
-      calls: calls.filter((call) => call.assumedChars > 0).length,
-      charsBefore: assumedBefore,
-      charsRemoved: Math.max(0, assumedBefore - assumedAfter),
     },
     ...(result ? { messagesAfter: result.stats.messagesAfter, charsAfter: result.stats.charsAfter,
       reductionRatio: reductionRatio(result), stats: result.stats, scores: scoreHistograms(result) } : {}),

@@ -24,7 +24,6 @@ export function parseArgs(args) {
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const actionKeys = ['keep', 'drop_result', 'protected', 'drop_call', 'pinned', 'resultChars'];
-const assumedKeys = ['calls', 'charsBefore', 'charsRemoved'];
 
 function validEvent(event) {
   if (!object(event) || event.v !== 1 || !Number.isFinite(Date.parse(event.ts)) ||
@@ -38,7 +37,6 @@ function validEvent(event) {
   if (event.jev !== undefined && (!object(event.jev) || !['requests', 'retries', 'ms'].every((key) => finite(event.jev[key])))) return false;
   if (event.reductionRatio !== undefined && !finite(event.reductionRatio)) return false;
   if (event.binaryChars !== undefined && (!object(event.binaryChars) || !finite(event.binaryChars.before) || !finite(event.binaryChars.removed))) return false;
-  if (event.assumedImages !== undefined && (!object(event.assumedImages) || !assumedKeys.every((key) => finite(event.assumedImages[key])))) return false;
   return true;
 }
 
@@ -70,15 +68,12 @@ export function totals(events) {
   const scores = { keepCall: Array(10).fill(0), keepResult: Array(10).fill(0) };
   const reductions = [];
   const binaryChars = { before: 0, removed: 0 };
-  // Events written before 0.5.2 carry no assumed images.
-  const assumedImages = Object.fromEntries(assumedKeys.map((key) => [key, 0]));
   for (const event of events) {
     // Auto observations describe the same attempt as the dispatch event.
     if (event.auto) { autoOutcomes[event.outcome] += 1; continue; }
     outcomes[event.outcome] += 1;
     binaryChars.before += event.binaryChars?.before ?? 0;
     binaryChars.removed += event.binaryChars?.removed ?? 0;
-    for (const key of assumedKeys) assumedImages[key] += event.assumedImages?.[key] ?? 0;
     if (event.outcome === 'fallback') fallbackReasons[event.reasonCode] = (fallbackReasons[event.reasonCode] ?? 0) + 1;
     if (event.outcome === 'jev' && finite(event.reductionRatio)) reductions.push(event.reductionRatio);
     for (const [name, counts] of Object.entries(event.byTool ?? {})) {
@@ -92,7 +87,7 @@ export function totals(events) {
   reductions.sort((a, b) => a - b);
   const n = reductions.length;
   const medianReduction = n ? (reductions[Math.floor((n - 1) / 2)] + reductions[Math.floor(n / 2)]) / 2 : undefined;
-  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores, binaryChars, assumedImages };
+  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores, binaryChars };
 }
 
 const percent = (number) => finite(number) ? `${(number * 100).toFixed(1)}%` : '-';
@@ -112,7 +107,6 @@ export function formatReport(events, skipped) {
     `Fallback reasons: ${JSON.stringify(sum.fallbackReasons)}`, `Median Jev reduction: ${percent(sum.medianReduction)}`,
     `Per-tool action totals: ${JSON.stringify(sum.byTool)}`, `Score histograms: ${JSON.stringify(sum.scores)}`,
     `Binary chars: ${JSON.stringify(sum.binaryChars)}`,
-    `Assumed images (matched by tool name; chars are an assumed weight, not measured): ${JSON.stringify(sum.assumedImages)}`,
     `Skipped unreadable/invalid entries: ${skipped}`);
   return lines.join('\n');
 }

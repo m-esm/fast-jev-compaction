@@ -1,5 +1,5 @@
 import { noRedaction, type Redactor } from './redact.js';
-import { DEFAULT_HIDDEN_CHARS_OPTIONS, hiddenChars, type HiddenCharsOptions } from './payload.js';
+import { binaryPayloadChars } from './payload.js';
 import type {
   CompactionState,
   FittedState,
@@ -63,13 +63,11 @@ export function isPinned(
 
 /**
  * Pairs every tool_use with its tool_result by `tool_use_id`. Calls without a
- * result are not candidates (there is nothing to drop yet). `hidden` must be
- * the options the char totals are taken with, or the two would disagree.
+ * result are not candidates (there is nothing to drop yet).
  */
 export function collectToolCalls(
   messages: readonly Message[],
   preserveRecentMessages: number,
-  hidden: HiddenCharsOptions = DEFAULT_HIDDEN_CHARS_OPTIONS,
 ): ToolCall[] {
   const results = new Map<string, { index: number; result: ToolResult }>();
   messages.forEach((message, index) => {
@@ -82,11 +80,6 @@ export function collectToolCalls(
     for (const tool of message.toolUses) {
       const found = results.get(tool.tool_use_id);
       if (!found) continue;
-      // The image lives with the result, so its text says whether it is still there.
-      const text = found.result.text;
-      const onCall = hiddenChars({ tool: tool.tool, result: tool.result, text }, hidden);
-      const onResult = hiddenChars({ tool: tool.tool, result: found.result.result, text }, hidden);
-      const payloadChars = Math.max(onCall.binary, onResult.binary);
       calls.push({
         id: `t${calls.length + 1}`,
         tool_use_id: tool.tool_use_id,
@@ -95,9 +88,10 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
-        payloadChars,
-        // A measured payload wins: the assumption only fills in for what cannot be seen.
-        assumedChars: payloadChars === 0 ? onResult.assumed : 0,
+        payloadChars: Math.max(
+          binaryPayloadChars(tool.result, found.result.text),
+          binaryPayloadChars(found.result.result, found.result.text),
+        ),
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||

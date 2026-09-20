@@ -96,7 +96,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
-    'assumedImageChars',
   ] as const) {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
@@ -135,15 +134,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const sideEffectTools = optionString(options, 'sideEffectTools');
   if (sideEffectTools) {
     config.sideEffectTools = sideEffectTools
-      .split(',')
-      .map((tool) => tool.trim())
-      .filter(Boolean);
-  }
-  // Unlike the other strings, an empty one means something here: no tool is
-  // assumed to return an image. Absent leaves the library defaults in force.
-  const imageTools = options['imageTools'];
-  if (typeof imageTools === 'string') {
-    config.imageTools = imageTools
       .split(',')
       .map((tool) => tool.trim())
       .filter(Boolean);

@@ -48,12 +48,6 @@ export interface ToolCall {
   resultIndex: number;
   resultChars: number;
   payloadChars: number;
-  /**
-   * Assumed weight of an image the plugin cannot see, charged because the tool
-   * name matched `imageTools`. 0 when a payload was measured instead, when the
-   * name does not match, or when the image was already dropped.
-   */
-  assumedChars: number;
   isError: boolean;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;
@@ -162,17 +156,6 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
-  /**
-   * Case-insensitive substrings of tool names taken to return an image the
-   * plugin cannot see (MCP render and screenshot tools). A tool is matched by
-   * name only. Default `DEFAULT_IMAGE_TOOLS`; an empty array disables it.
-   */
-  imageTools?: readonly string[];
-  /**
-   * ASSUMED weight of one such image, in the same chars as everything else.
-   * An assumption, not a measurement. Default 6000.
-   */
-  assumedImageChars?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -188,8 +171,6 @@ export interface ResolvedCompactOptions {
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
-  imageTools: readonly string[];
-  assumedImageChars: number;
 }
 
 export interface CompactResult {

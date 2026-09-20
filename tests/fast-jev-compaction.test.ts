@@ -251,7 +251,6 @@ describe('question batching', () => {
     resultIndex: i * 2 + 2,
     resultChars: 100,
     payloadChars: 0,
-    assumedChars: 0,
     isError: false,
     pinned: false,
   }));

@@ -1,15 +1,6 @@
 import { createRedactor, type Redactor } from './redact.js';
 import { noulAnswer } from './request.js';
-import {
-  DEFAULT_ASSUMED_IMAGE_CHARS,
-  DEFAULT_HIDDEN_CHARS_OPTIONS,
-  DEFAULT_IMAGE_TOOLS,
-  IMAGE_DROP_MARK,
-  IMAGE_DROP_NOTE,
-  IMAGE_SIBLING_NOTE,
-  hiddenChars,
-  type HiddenCharsOptions,
-} from './payload.js';
+import { binaryPayloadChars } from './payload.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import type {
   CallAnswer,
@@ -23,7 +14,6 @@ import type {
   Message,
   ResolvedCompactOptions,
   ToolCall,
-  ToolResult,
   ToolUse,
 } from './types.js';
 
@@ -61,9 +51,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
-  // Matched by name only, and the weight is an assumption: see `hiddenChars`.
-  imageTools: DEFAULT_IMAGE_TOOLS,
-  assumedImageChars: DEFAULT_ASSUMED_IMAGE_CHARS,
 };
 
 /** A tool whose calls the safety rules refuse to remove entirely. */
@@ -116,13 +103,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     truncateHeadChars: Math.max(
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
-    ),
-    imageTools: (options.imageTools ?? DEFAULT_OPTIONS.imageTools)
-      .map((part) => part.trim().toLowerCase())
-      .filter((part) => part.length > 0),
-    assumedImageChars: Math.max(
-      0,
-      Math.floor(finite(options.assumedImageChars, DEFAULT_OPTIONS.assumedImageChars)),
     ),
   };
 }
@@ -230,42 +210,11 @@ function removedPayloadText(text: string, payloadChars: number): string {
   return `${text}\n[fast-jev-compaction removed a ~${Math.ceil(payloadChars / 1024)} KB binary payload (image) from this tool result; re-run the tool if needed]`;
 }
 
-type HiddenWeight = Pick<ToolCall, 'payloadChars' | 'assumedChars'>;
-
-function hasHiddenChars(call: HiddenWeight | undefined): boolean {
-  return call !== undefined && (call.payloadChars > 0 || call.assumedChars > 0);
-}
-
-/**
- * The text a dropped result is left with: the normal truncation, then a note
- * for whatever goes with the rebuild (a measured payload, or an assumed image).
- * A note an earlier compaction left is set aside first and put back, so
- * truncating again never cuts the mark off and a second pass changes nothing.
- */
-function droppedResultText(
-  text: string,
-  isError: boolean,
-  headChars: number,
-  call: HiddenWeight | undefined,
-): string {
-  const at = text.indexOf(IMAGE_DROP_MARK);
-  const body = at < 0 ? text : text.slice(0, at).replace(/\n$/, '');
-  const truncated = truncatedResultText(body, isError, headChars);
-  const kept = at < 0 ? truncated : `${truncated}\n${text.slice(at)}`;
-  if (call && call.payloadChars > 0) return removedPayloadText(kept, call.payloadChars);
-  // `assumedChars` is read off the result side; the mirrored text may be marked already.
-  if (call && call.assumedChars > 0 && at < 0) return `${kept}\n${IMAGE_DROP_NOTE}`;
-  return kept;
-}
-
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
  * together with its result; a dropped result keeps a bounded head and note.
  * Messages that lose all their content are removed; untouched messages are
- * returned as the same objects they came in as. A result with a measured
- * payload or an assumed image is always rebuilt when dropped, on both sides
- * of its pair, because only a rebuilt message loses the image. A kept result
- * that shares a rebuilt message loses its image with it and is told so.
+ * returned as the same objects they came in as.
  */
 export function applyDecisions(
   messages: readonly Message[],
@@ -274,52 +223,52 @@ export function applyDecisions(
   headChars: number,
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
-  const byUseId = new Map(calls.map((call) => [call.tool_use_id, call]));
+  const payloads = new Map(calls.map((call) => [call.tool_use_id, call.payloadChars]));
   const actions = new Map<string, CallDecision['action']>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
     if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
   }
-  const copyUse = (tool: ToolUse, text: string): ToolUse => {
-    const copy: ToolUse = {
-      tool_use_id: tool.tool_use_id,
-      tool: tool.tool,
-      input: tool.input,
-      text,
-    };
-    if (tool.isError) copy.isError = true;
-    return copy;
-  };
-  const copyResult = (result: ToolResult, text: string): ToolResult => ({
-    tool_use_id: result.tool_use_id,
-    text,
-    isError: result.isError,
-  });
-  /** What the decisions alone make of one message, or undefined when it stands as it came. */
-  const rewrite = (
-    message: Message,
-  ): { toolUses: ToolUse[]; toolResults: ToolResult[] } | undefined => {
+  const kept: Message[] = [];
+  for (const message of messages) {
     const touched =
       message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
       (message.toolResults ?? []).some((result) => actions.has(result.tool_use_id));
-    if (!touched) return undefined;
+    if (!touched) {
+      kept.push(message);
+      continue;
+    }
     const toolUses = message.toolUses
       .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
       .map((tool) => {
         if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const call = byUseId.get(tool.tool_use_id);
-        const text = droppedResultText(tool.text ?? '', tool.isError ?? false, headChars, call);
-        // A payload or an assumed image forces the rebuild: only a message
-        // without its handle loses the image.
-        return !hasHiddenChars(call) && (tool.text ?? '') === text ? tool : copyUse(tool, text);
+        const payloadChars = payloads.get(tool.tool_use_id) ?? 0;
+        const truncated = truncatedResultText(tool.text ?? '', tool.isError ?? false, headChars);
+        const text = payloadChars > 0 ? removedPayloadText(truncated, payloadChars) : truncated;
+        if (payloadChars === 0 && (tool.text ?? '') === text) return tool;
+        const copy: ToolUse = {
+          tool_use_id: tool.tool_use_id,
+          tool: tool.tool,
+          input: tool.input,
+          text,
+        };
+        if (tool.isError) copy.isError = true;
+        return copy;
       });
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const call = byUseId.get(result.tool_use_id);
-        const text = droppedResultText(result.text, result.isError ?? false, headChars, call);
-        return !hasHiddenChars(call) && text === result.text ? result : copyResult(result, text);
+        const payloadChars = payloads.get(result.tool_use_id) ?? 0;
+        const truncated = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const text = payloadChars > 0 ? removedPayloadText(truncated, payloadChars) : truncated;
+        return payloadChars === 0 && text === result.text
+          ? result
+          : {
+              tool_use_id: result.tool_use_id,
+              text,
+              isError: result.isError,
+            };
       });
     if (
       !message.toolUses.some(
@@ -333,38 +282,9 @@ export function applyDecisions(
         (result, index) => result === message.toolResults?.[index],
       )
     ) {
-      return undefined;
-    }
-    return { toolUses, toolResults };
-  };
-  const rewrites = messages.map(rewrite);
-  // A rebuilt message loses every image in it, the ones of kept results too.
-  // The image lives with the result, so that side decides what was lost.
-  const lost = new Set<string>();
-  rewrites.forEach((rewritten) => {
-    for (const result of rewritten?.toolResults ?? []) {
-      if (actions.has(result.tool_use_id) || result.text.includes(IMAGE_DROP_MARK)) continue;
-      if (hasHiddenChars(byUseId.get(result.tool_use_id))) lost.add(result.tool_use_id);
-    }
-  });
-  const kept: Message[] = [];
-  for (const [index, message] of messages.entries()) {
-    const rewritten = rewrites[index];
-    if (!rewritten) {
       kept.push(message);
       continue;
     }
-    // Both sides of the pair say so, wherever the side is being rebuilt anyway.
-    const toolUses = rewritten.toolUses.map((tool) =>
-      lost.has(tool.tool_use_id) && !(tool.text ?? '').includes(IMAGE_DROP_MARK)
-        ? copyUse(tool, `${tool.text ?? ''}\n${IMAGE_SIBLING_NOTE}`)
-        : tool,
-    );
-    const toolResults = rewritten.toolResults.map((result) =>
-      lost.has(result.tool_use_id)
-        ? copyResult(result, `${result.text}\n${IMAGE_SIBLING_NOTE}`)
-        : result,
-    );
     const dropped = message.toolUses.filter((tool) => actions.get(tool.tool_use_id) === 'drop_call');
     const counts = new Map<string, number>();
     for (const tool of dropped) counts.set(tool.tool, (counts.get(tool.tool) ?? 0) + 1);
@@ -383,59 +303,31 @@ export function applyDecisions(
   return kept;
 }
 
-/** Tool name per `tool_use_id`: a tool result does not carry the name of its tool. */
-function toolNames(messages: readonly Message[]): Map<string, string> {
-  const names = new Map<string, string>();
-  for (const message of messages) {
-    for (const tool of message.toolUses) names.set(tool.tool_use_id, tool.tool);
-  }
-  return names;
-}
-
-/**
- * Characters of text, tool input and tool output a message holds, plus what
- * `hiddenChars` says its tool results weigh beyond their text. `payloads`
- * carries what was already charged per `tool_use_id`, and `tools` names the
- * tool behind a result held by another message; both default to this message
- * alone. An assumed image is charged where it lives, on the result.
- */
-export function messageChars(
-  message: Message,
-  payloads = new Map<string, number>(),
-  hidden: HiddenCharsOptions = DEFAULT_HIDDEN_CHARS_OPTIONS,
-  tools: ReadonlyMap<string, string> = toolNames([message]),
-): number {
-  let total = message.text.length + hiddenChars({ tool: '', result: message.result }, hidden).binary;
-  const countHidden = (id: string, result: unknown, modelText: string, onResult: boolean) => {
-    const weight = hiddenChars({ tool: tools.get(id) ?? '', result, text: modelText }, hidden);
+/** Characters of text, tool input and tool output a message holds. */
+export function messageChars(message: Message, payloads = new Map<string, number>()): number {
+  let total = message.text.length + binaryPayloadChars(message.result);
+  const countPayload = (id: string, result: unknown, modelText = '') => {
+    const size = binaryPayloadChars(result, modelText);
     const counted = payloads.get(id) ?? 0;
-    // Same rule as `collectToolCalls`: a measured payload wins over the assumption.
-    const size = weight.binary > 0 ? weight.binary : onResult && counted === 0 ? weight.assumed : 0;
     payloads.set(id, Math.max(counted, size));
     return Math.max(0, size - counted);
   };
   for (const tool of message.toolUses) {
-    total += countHidden(tool.tool_use_id, tool.result, tool.text ?? '', false);
+    total += countPayload(tool.tool_use_id, tool.result, tool.text ?? '');
     try {
       total += JSON.stringify(tool.input).length;
     } catch {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) {
-    total += result.text.length + countHidden(result.tool_use_id, result.result, result.text, true);
-  }
+  for (const result of message.toolResults ?? []) total += result.text.length + countPayload(result.tool_use_id, result.result, result.text);
   return total;
 }
 
 /** Stored results appear on both sides of a tool pair; charge their payload once. */
-export function transcriptChars(
-  messages: readonly Message[],
-  hidden: HiddenCharsOptions = DEFAULT_HIDDEN_CHARS_OPTIONS,
-): number {
+export function transcriptChars(messages: readonly Message[]): number {
   const payloads = new Map<string, number>();
-  const tools = toolNames(messages);
-  return messages.reduce((sum, message) => sum + messageChars(message, payloads, hidden, tools), 0);
+  return messages.reduce((sum, message) => sum + messageChars(message, payloads), 0);
 }
 
 /**
@@ -448,8 +340,8 @@ export function droppableRatio(
   options: CompactOptions = {},
 ): number {
   const resolved = resolveOptions(options);
-  const calls = collectToolCalls(messages, resolved.preserveRecentMessages, resolved);
-  const total = transcriptChars(messages, resolved);
+  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
+  const total = transcriptChars(messages);
   if (total === 0) return 0;
   const byResultId = new Map<string, number>();
   for (const message of messages) {
@@ -461,8 +353,7 @@ export function droppableRatio(
   for (const call of calls) {
     if (call.pinned) continue;
     const resultChars = byResultId.get(call.tool_use_id) ?? call.resultChars;
-    droppable +=
-      Math.max(0, resultChars - resolved.truncateHeadChars) + call.payloadChars + call.assumedChars;
+    droppable += Math.max(0, resultChars - resolved.truncateHeadChars) + call.payloadChars;
   }
   return droppable / total;
 }
@@ -490,9 +381,9 @@ export async function compact(
 ): Promise<CompactResult> {
   const started = Date.now();
   const resolved = resolveOptions(options);
-  const calls = collectToolCalls(messages, resolved.preserveRecentMessages, resolved);
+  const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
   const candidates = calls.filter((call) => !call.pinned);
-  const charsBefore = transcriptChars(messages, resolved);
+  const charsBefore = transcriptChars(messages);
 
   const redactor: Redactor = createRedactor({
     level: resolved.redact,
@@ -533,7 +424,7 @@ export async function compact(
       messagesBefore: messages.length,
       messagesAfter: kept.length,
       charsBefore,
-      charsAfter: transcriptChars(kept, resolved),
+      charsAfter: transcriptChars(kept),
       calls: calls.length,
       kept: count(decisions, 'kept'),
       resultsDropped: count(decisions, 'result_dropped'),
