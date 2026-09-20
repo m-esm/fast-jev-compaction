@@ -456,38 +456,47 @@ export function noteCompaction(
   return next;
 }
 
+type EventState = {
+  configured: HookConfig;
+  lastEventMs: number;
+  pluginEvent: CompactionEvent | undefined;
+};
+
+async function now($: CoreEngineInterface) {
+  try { return await $.clock.now(); } catch { return 0; }
+}
+
+async function usage($: CoreEngineInterface) {
+  try { return (await $.session.usage()).context.percent ?? undefined; } catch { return undefined; }
+}
+
+async function persist($: CoreEngineInterface, state: EventState, input: Omit<EventInput, 'ts' | 'sessionId'> | CompactionEvent, suffix?: string) {
+  const { configured } = state;
+  if (!configured.events) return;
+  try {
+    // Reserve a distinct millisecond even when two dispatches finish together.
+    state.lastEventMs = Math.max(await $.clock.now(), state.lastEventMs + 1);
+    const ts = new Date(state.lastEventMs).toISOString();
+    const sessionId = await $.session.id();
+    const record = 'v' in input ? { ...input, ts, sessionId } : buildCompactionEvent({ ...input, ts, sessionId });
+    if (!suffix && record.trigger === 'plugin') state.pluginEvent = record;
+    const home = configured.eventsDir ? undefined : await $.env.get('HOME');
+    const dir = configured.eventsDir ?? (home ? `${home}/.claude/cache/fast-jev-compaction/events` : undefined);
+    if (!dir) throw new Error('HOME unavailable');
+    const stamp = ts.replace(/[-:.]/g, '');
+    const session8 = sessionId.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, '_');
+    await $.fs.write(`${dir}/${stamp}-${session8}-${suffix ?? record.trigger}.json`, JSON.stringify(record));
+  } catch {
+    $.ui.log('fast-jev-compaction: event write failed');
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let auto = initialAutoCompactState(configured);
   const gitleaks: GitleaksState = {};
   let compacting = false;
-  let lastEventMs = 0;
-  let pluginEvent: CompactionEvent | undefined;
-  const now = async ($: CoreEngineInterface) => {
-    try { return await $.clock.now(); } catch { return 0; }
-  };
-  const usage = async ($: CoreEngineInterface) => {
-    try { return (await $.session.usage()).context.percent ?? undefined; } catch { return undefined; }
-  };
-  const persist = async ($: CoreEngineInterface, input: Omit<EventInput, 'ts' | 'sessionId'> | CompactionEvent, suffix?: string) => {
-    if (!configured.events) return;
-    try {
-      // Reserve a distinct millisecond even when two dispatches finish together.
-      lastEventMs = Math.max(await $.clock.now(), lastEventMs + 1);
-      const ts = new Date(lastEventMs).toISOString();
-      const sessionId = await $.session.id();
-      const record = 'v' in input ? { ...input, ts, sessionId } : buildCompactionEvent({ ...input, ts, sessionId });
-      if (!suffix && record.trigger === 'plugin') pluginEvent = record;
-      const home = configured.eventsDir ? undefined : await $.env.get('HOME');
-      const dir = configured.eventsDir ?? (home ? `${home}/.claude/cache/fast-jev-compaction/events` : undefined);
-      if (!dir) throw new Error('HOME unavailable');
-      const stamp = ts.replace(/[-:.]/g, '');
-      const session8 = sessionId.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, '_');
-      await $.fs.write(`${dir}/${stamp}-${session8}-${suffix ?? record.trigger}.json`, JSON.stringify(record));
-    } catch {
-      $.ui.log('fast-jev-compaction: event write failed');
-    }
-  };
+  const eventState: EventState = { configured, lastEventMs: 0, pluginEvent: undefined };
 
   on('session.compact', async ($, event, next) => {
     const started = await now($);
@@ -553,7 +562,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         throw error;
       }
     } finally {
-      await persist($, { trigger: event.trigger, agentId: event.agentId, model: configured.model,
+      await persist($, eventState, { trigger: event.trigger, agentId: event.agentId, model: configured.model,
         outcome, reasonCode, error: failure, ceilingRatio: ceiling,
         minReductionRatio: configured.minReductionRatio, options: configured, messages: event.messages,
         result, contextPercentBefore, jev: metrics, totalMs: Math.max(0, await now($) - started) });
@@ -578,7 +587,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       compacting = true;
       attempted = true;
-      pluginEvent = undefined;
+      eventState.pluginEvent = undefined;
       started = await now($);
       const result = await $.session.compact();
       skipped = result.skip !== undefined;
@@ -599,12 +608,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
       $.ui.log('auto-compact skipped (compaction failed)');
     } finally {
       if (attempted) {
-        const recorded = pluginEvent as CompactionEvent | undefined;
+        const recorded = eventState.pluginEvent as CompactionEvent | undefined;
         const totalMs = Math.max(0, await now($) - started);
         const base = recorded ?? buildCompactionEvent({ ts: '', sessionId: '', trigger: 'plugin', model: configured.model,
           outcome: skipped || failure ? 'skipped' : 'fallback', reasonCode: failure ? 'error' : 'ok',
           ceilingRatio: 0, minReductionRatio: configured.minReductionRatio, options: configured, messages: [], totalMs });
-        await persist($, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
+        await persist($, eventState, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
           contextPercentBefore: before, contextPercentAfter: after ?? before, totalMs,
           auto: { trigger: auto.trigger, compactions: auto.compactions, ...(auto.disabledReason ? { disabledReason: auto.disabledReason } : {}) } }, 'auto');
       }
