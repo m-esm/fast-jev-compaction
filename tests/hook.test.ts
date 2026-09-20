@@ -61,7 +61,7 @@ function fakeEngine(options: Record<string, unknown> = {}) {
     apiKey: 'fake', gitleaks: false, preserveRecentMessages: 1, ...options,
   });
   const $ = {
-    env: { get: vi.fn(async () => undefined) },
+    env: { get: vi.fn(async (name: string) => name === 'HOME' ? '/fake-home' : undefined) },
     settings: { read: vi.fn(async () => ({})) },
     clock: { now: vi.fn(async () => 1789910000000), sleep: vi.fn(async () => {}) },
     fs: { write: vi.fn(async () => {}) },
@@ -141,10 +141,85 @@ it.each(['success', 'ceiling', 'reduction', 'key', 'error'])('keeps precompute s
   expect(engine.next).toHaveBeenCalledTimes(path === 'success' ? 0 : 1);
 });
 
+describe('persisted hook events', () => {
+  it.each(['manual', 'auto', 'plugin', 'precompute'])('writes exactly one %s dispatch event', async (trigger) => {
+    const engine = fakeEngine();
+    await engine.dispatch(trigger);
+    expect(engine.$.fs.write).toHaveBeenCalledTimes(1);
+    const [path, body] = engine.$.fs.write.mock.calls[0] as unknown as [string, string];
+    expect(path).toMatch(new RegExp(`^/fake-home/.claude/cache/fast-jev-compaction/events/\\d{8}T\\d{9}Z-12345678-${trigger}\\.json$`));
+    expect(JSON.parse(body)).toMatchObject({ v: 1, trigger, outcome: 'jev', reasonCode: 'ok', contextPercentBefore: 80, jev: { requests: 1, retries: 0, ms: 0 } });
+  });
+
+  it.each(['success', 'ceiling', 'reduction', 'key', 'error'])('never persists sentinel contents on %s', async (path) => {
+    const secret = 'SENTINEL_SECRET_9f3a'; // gitleaks:allow (test sentinel, not a credential)
+    const engine = fakeEngine({ apiKey: path === 'key' ? '' : secret });
+    const messages = transcript();
+    messages[0]!.text = secret;
+    messages[1]!.toolUses[0]!.input = { file_path: `/private/${secret}` };
+    messages[2]!.toolResults![0]!.text = secret.repeat(100);
+    if (path === 'reduction') engine.$.http.fetch.mockImplementation(jevFetch(() => 1));
+    if (path === 'error') engine.$.http.fetch.mockResolvedValue({ status: 500, ok: false, text: secret });
+    await engine.dispatch('plugin', path === 'ceiling' ? [message('user', secret)] : messages);
+    expect(engine.$.fs.write).toHaveBeenCalledTimes(1);
+    const record = JSON.parse((engine.$.fs.write.mock.calls[0] as unknown as [string, string])[1]);
+    expect(JSON.stringify(record)).not.toContain(secret);
+    expect(JSON.stringify(record)).not.toContain('/private/');
+    expect(record.outcome).toBe(path === 'success' ? 'jev' : 'skipped');
+    if (path === 'error') expect(record.jev).toMatchObject({ requests: 2, retries: 1 });
+  });
+
+  it('continues compaction when event writing fails without logging the exception', async () => {
+    const engine = fakeEngine();
+    engine.$.fs.write.mockRejectedValue(new Error('SENTINEL_SECRET_9f3a'));
+    expect(await engine.dispatch('manual')).toHaveProperty('messages');
+    expect(engine.$.ui.log.mock.calls.flat().filter((s) => s.includes('event write failed'))).toHaveLength(1);
+    expect(engine.$.ui.log.mock.calls.flat().join(' ')).not.toContain('SENTINEL_SECRET_9f3a');
+  });
+
+  it('honors eventsDir, avoids collisions, and supports disabling events', async () => {
+    const engine = fakeEngine({ eventsDir: '/custom' });
+    await Promise.all([engine.dispatch('manual'), engine.dispatch('manual')]);
+    const paths = engine.$.fs.write.mock.calls.map((call) => call[0]);
+    expect(new Set(paths).size).toBe(2);
+    expect(paths.every((path) => String(path).startsWith('/custom/'))).toBe(true);
+    const disabled = fakeEngine({ events: false });
+    await disabled.dispatch('manual');
+    expect(disabled.$.fs.write).not.toHaveBeenCalled();
+  });
+
+  it('writes an additional auto event with skip and escalation state', async () => {
+    const engine = fakeEngine();
+    engine.$.session.compact.mockImplementation(async () => engine.dispatch('plugin', [message('user', 'text')]));
+    await engine.turn();
+    const writes = engine.$.fs.write.mock.calls as unknown as [string, string][];
+    expect(writes).toHaveLength(2);
+    expect(writes[1]![0]).toMatch(/-auto.json$/);
+    expect(JSON.parse(writes[1]![1])).toMatchObject({ trigger: 'plugin', outcome: 'skipped', reasonCode: 'ceiling_below_min',
+      contextPercentBefore: 80, contextPercentAfter: 80, auto: { trigger: 85, compactions: 1 } });
+  });
+
+  it('records core errors and calls next only once', async () => {
+    const engine = fakeEngine();
+    engine.next.mockRejectedValue(new Error('core failed'));
+    await expect(engine.dispatch('manual', [message('user', 'text')])).rejects.toThrow('core failed');
+    expect(engine.next).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((engine.$.fs.write.mock.calls[0] as unknown as [string, string])[1]).reasonCode).toBe('error');
+  });
+
+  it('tolerates unavailable context usage', async () => {
+    const engine = fakeEngine();
+    engine.$.session.usage.mockRejectedValue(new Error('unavailable'));
+    expect(await engine.dispatch('manual')).toHaveProperty('messages');
+    expect(JSON.parse((engine.$.fs.write.mock.calls[0] as unknown as [string, string])[1]).contextPercentBefore).toBeUndefined();
+  });
+});
+
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
       gitleaks: true,
+      events: true,
       compactAtPercent: 60,
       minReductionRatio: 0.25,
       cooldownTurns: 3,
@@ -167,6 +242,7 @@ describe('hook config', () => {
     ).toEqual({
       apiKey: 'k',
       gitleaks: true,
+      events: true,
       keepCallThreshold: 0.3,
       maxStateTokens: 1000,
       model: 'jev-x',

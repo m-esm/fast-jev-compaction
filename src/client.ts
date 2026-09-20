@@ -15,6 +15,7 @@ export interface JevClientOptions {
 
 /** Asks Jev over HTTP with the global `fetch` (or an injected one). */
 export class JevClient implements JevAsker {
+  readonly stats = { requests: 0, retries: 0 };
   private readonly apiKey: string;
   private readonly model: string | undefined;
   private readonly baseUrl: string | undefined;
@@ -28,9 +29,15 @@ export class JevClient implements JevAsker {
   }
 
   async ask(state: JevState, questions: JevQuestions): Promise<JevResponse> {
-    return withRetry({ ask: (s, q) => this.askOnce(s, q) }, {
+    const asker = withRetry({ ask: (s, q) => this.askOnce(s, q) }, {
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    }).ask(state, questions);
+    });
+    try {
+      return await asker.ask(state, questions);
+    } finally {
+      this.stats.requests += asker.stats.requests;
+      this.stats.retries += asker.stats.retries;
+    }
   }
 
   private async askOnce(state: JevState, questions: JevQuestions): Promise<JevResponse> {

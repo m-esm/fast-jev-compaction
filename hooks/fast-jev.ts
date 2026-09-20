@@ -1,5 +1,6 @@
 import type {
   On,
+  CoreEngineInterface,
   PluginOptions,
   Register,
   SessionMessage,
@@ -13,6 +14,7 @@ import { compact, droppableRatio, reductionRatio, resolveOptions } from '../src/
 import { scanForSecrets, type GitleaksOptions, type ProcessRunner } from '../src/gitleaks.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import { JevNetworkError, withRetry, type RetryOptions } from '../src/retry.js';
+import { buildCompactionEvent, eventReason, type CompactionEvent, type EventInput, type ReasonCode } from '../src/events.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -69,6 +71,8 @@ export type HookConfig = CompactOptions & {
   minPercentDrop: number;
   maxAutoCompactions: number;
   model: string;
+  events: boolean;
+  eventsDir?: string;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -117,6 +121,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       optionNumber(options, 'maxAutoCompactions', HOOK_DEFAULTS.maxAutoCompactions),
     ),
     gitleaks: options['gitleaks'] !== false,
+    events: options['events'] !== false,
+    ...(optionString(options, 'eventsDir') ? { eventsDir: optionString(options, 'eventsDir') } : {}),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
   };
   const gitleaksBinary = optionString(options, 'gitleaksBinary');
@@ -274,11 +280,16 @@ export async function compactSession(
   config: HookConfig,
   fetchFn: HookFetch,
   retry: RetryOptions = { sleep: async () => {} },
+  metrics?: { requests: number; retries: number },
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
   const asker = withRetry(jevAsker(fetchFn, config.apiKey, config.model), retry);
-  const result = await compact(messages, asker, config);
-  return { result, messages: toSessionMessages(messages, result.messages) };
+  try {
+    const result = await compact(messages, asker, config);
+    return { result, messages: toSessionMessages(messages, result.messages) };
+  } finally {
+    if (metrics) Object.assign(metrics, asker.stats);
+  }
 }
 
 function percent(ratio: number): string {
@@ -450,86 +461,128 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let auto = initialAutoCompactState(configured);
   const gitleaks: GitleaksState = {};
   let compacting = false;
+  let lastEventMs = 0;
+  let pluginEvent: CompactionEvent | undefined;
+  const now = async ($: CoreEngineInterface) => {
+    try { return await $.clock.now(); } catch { return 0; }
+  };
+  const usage = async ($: CoreEngineInterface) => {
+    try { return (await $.session.usage()).context.percent ?? undefined; } catch { return undefined; }
+  };
+  const persist = async ($: CoreEngineInterface, input: Omit<EventInput, 'ts' | 'sessionId'> | CompactionEvent, suffix?: string) => {
+    if (!configured.events) return;
+    try {
+      // Reserve a distinct millisecond even when two dispatches finish together.
+      lastEventMs = Math.max(await $.clock.now(), lastEventMs + 1);
+      const ts = new Date(lastEventMs).toISOString();
+      const sessionId = await $.session.id();
+      const record = 'v' in input ? { ...input, ts, sessionId } : buildCompactionEvent({ ...input, ts, sessionId });
+      if (!suffix && record.trigger === 'plugin') pluginEvent = record;
+      const home = configured.eventsDir ? undefined : await $.env.get('HOME');
+      const dir = configured.eventsDir ?? (home ? `${home}/.claude/cache/fast-jev-compaction/events` : undefined);
+      if (!dir) throw new Error('HOME unavailable');
+      const stamp = ts.replace(/[-:.]/g, '');
+      const session8 = sessionId.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, '_');
+      await $.fs.write(`${dir}/${stamp}-${session8}-${suffix ?? record.trigger}.json`, JSON.stringify(record));
+    } catch {
+      $.ui.log('fast-jev-compaction: event write failed');
+    }
+  };
 
   on('session.compact', async ($, event, next) => {
+    const started = await now($);
+    const contextPercentBefore = await usage($);
+    const metrics = { requests: 0, retries: 0, ms: 0 };
+    let ceiling = 0;
+    let result: CompactResult | undefined;
+    let reasonCode: ReasonCode = 'error';
+    let failure: unknown;
+    let outcome: CompactionEvent['outcome'] = event.trigger === 'plugin' ? 'skipped' : 'fallback';
     const finish = (result: SessionCompactResult) => {
       if (result.messages && event.trigger !== 'precompute') auto.turnsSinceCompaction = 0;
       return result;
     };
-    const fallback = async (reason: string) => event.trigger === 'plugin'
-      ? { skip: reason }
-      : finish(await next(event));
     const fallbackLabel = event.trigger === 'plugin' ? 'compaction skipped' : 'fallback to built-in summary';
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
-      // Local, free, and no request: if even a perfect run could not reach the
-      // minimum, fall back now instead of paying Jev to tell us so.
-      const ceiling = droppableRatio(event.messages, config);
-      if (ceiling < config.minReductionRatio) {
-        notify(
-          $,
-          `${fallbackLabel} (at most ${percent(ceiling)} removable, below the ${percent(
-            config.minReductionRatio,
-          )} minimum; Jev not called)`,
-          event.trigger === 'precompute',
-        );
-        return fallback('ceiling_below_min');
+      try {
+        ceiling = droppableRatio(event.messages, configured);
+        if (ceiling < configured.minReductionRatio) reasonCode = 'ceiling_below_min';
+        else {
+          const config = { ...configured, apiKey: await getApiKey($, configured) };
+          if (!config.apiKey) reasonCode = 'no_api_key';
+          else {
+            const scanned = await withScannedSecrets(event.messages, config,
+              (argv, init) => $.process.run(argv, init), gitleaks);
+            if (scanned.note) $.ui.log(scanned.note);
+            const jevStarted = await now($);
+            try {
+              const compacted = await compactSession(event.messages, scanned.config, async (url, init) => {
+                const response = await $.http.fetch(url, init);
+                return { status: response.status, ok: response.ok, text: response.text };
+              }, { sleep: (ms) => $.clock.sleep(ms, { signal: next.signal }) }, metrics);
+              result = compacted.result;
+              reasonCode = reductionRatio(result) < config.minReductionRatio ? 'reduction_below_min' : 'ok';
+              for (const line of decisionLogLines(result)) $.ui.log(line);
+              if (reasonCode === 'ok') {
+                outcome = 'jev';
+                notify($, `kept ${compacted.messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, event.trigger === 'precompute');
+                return finish({ messages: compacted.messages });
+              }
+            } catch (error) {
+              reasonCode = 'jev_error';
+              failure = error;
+            } finally {
+              metrics.ms = Math.max(0, await now($) - jevStarted);
+            }
+          }
+        }
+      } catch (error) {
+        reasonCode = 'error';
+        failure = error;
       }
-      if (!config.apiKey) {
-        notify($, `${fallbackLabel} (TYPESAFE_API_KEY is not configured)`, event.trigger === 'precompute');
-        return fallback('no_api_key');
+      notify($, `${fallbackLabel} (${eventReason(reasonCode, failure)}${result ? `; ${summarize(result)}` : ''})`, event.trigger === 'precompute');
+      if (event.trigger === 'plugin') return { skip: reasonCode };
+      // Delegate once, outside the Jev catch: a core failure is not a Jev retry.
+      try {
+        const fallback = await next(event);
+        if (fallback.skip !== undefined) outcome = 'skipped';
+        return finish(fallback);
+      } catch (error) {
+        reasonCode = 'error';
+        failure = error;
+        throw error;
       }
-      // Wrapped rather than passed: the engine's nouns are only ever called
-      // in place, never handed around as values.
-      const scanned = await withScannedSecrets(
-        event.messages,
-        config,
-        (argv, init) => $.process.run(argv, init),
-        gitleaks,
-      );
-      if (scanned.note) $.ui.log(scanned.note);
-      const { result, messages } = await compactSession(event.messages, scanned.config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
-      }, { sleep: (ms) => $.clock.sleep(ms, { signal: next.signal }) });
-      for (const line of decisionLogLines(result)) $.ui.log(line);
-      if (reductionRatio(result) < config.minReductionRatio) {
-        notify(
-          $,
-          `${fallbackLabel} (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
-          event.trigger === 'precompute',
-        );
-        return fallback('reduction_below_min');
-      }
-      notify(
-        $,
-        `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
-        event.trigger === 'precompute',
-      );
-      return finish({ messages });
-    } catch (error) {
-      notify(
-        $,
-        `${fallbackLabel} (${error instanceof Error ? error.message : String(error)})`,
-        event.trigger === 'precompute',
-      );
-      return fallback('jev_error');
+    } finally {
+      await persist($, { trigger: event.trigger, agentId: event.agentId, model: configured.model,
+        outcome, reasonCode, error: failure, ceilingRatio: ceiling,
+        minReductionRatio: configured.minReductionRatio, options: configured, messages: event.messages,
+        result, contextPercentBefore, jev: metrics, totalMs: Math.max(0, await now($) - started) });
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting) return next(event);
     auto = { ...auto, turnsSinceCompaction: auto.turnsSinceCompaction + 1 };
+    let before: number | undefined;
+    let after: number | undefined;
+    let started = 0;
+    let attempted = false;
+    let skipped = false;
+    let failure: unknown;
     try {
-      const before = (await $.session.usage()).context.percent ?? 0;
+      before = (await $.session.usage()).context.percent ?? 0;
       const verdict = shouldAutoCompact(auto, before, configured);
       if (!verdict.compact) {
         if (verdict.reason) $.ui.log(verdict.reason);
         return next(event);
       }
       compacting = true;
+      attempted = true;
+      pluginEvent = undefined;
+      started = await now($);
       const result = await $.session.compact();
-      const after = result.skip !== undefined ? before : (await $.session.usage()).context.percent ?? before;
+      skipped = result.skip !== undefined;
+      after = skipped ? before : await usage($) ?? before;
       const previous = auto;
       auto = noteCompaction(auto, before, after, configured);
       if (auto.trigger !== previous.trigger) {
@@ -541,10 +594,20 @@ export const register: Register = (on: On, options: PluginOptions) => {
         notify($, `auto-compaction disabled for this session: ${auto.disabledReason}`);
       }
     } catch (error) {
-      $.ui.log(
-        `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
-      );
+      failure = error;
+      if (attempted && before !== undefined) auto = noteCompaction(auto, before, before, configured);
+      $.ui.log('auto-compact skipped (compaction failed)');
     } finally {
+      if (attempted) {
+        const recorded = pluginEvent as CompactionEvent | undefined;
+        const totalMs = Math.max(0, await now($) - started);
+        const base = recorded ?? buildCompactionEvent({ ts: '', sessionId: '', trigger: 'plugin', model: configured.model,
+          outcome: skipped || failure ? 'skipped' : 'fallback', reasonCode: failure ? 'error' : 'ok',
+          ceilingRatio: 0, minReductionRatio: configured.minReductionRatio, options: configured, messages: [], totalMs });
+        await persist($, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
+          contextPercentBefore: before, contextPercentAfter: after ?? before, totalMs,
+          auto: { trigger: auto.trigger, compactions: auto.compactions, ...(auto.disabledReason ? { disabledReason: auto.disabledReason } : {}) } }, 'auto');
+      }
       compacting = false;
     }
     return next(event);

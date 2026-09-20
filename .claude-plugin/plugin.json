@@ -4,6 +4,17 @@
   "description": "Verbatim Jev-guided compaction for Claude Code sessions, with PII masking and auto-compaction guards.",
   "license": "MIT",
   "userConfig": {
+    "events": {
+      "type": "boolean",
+      "title": "Persist compaction events",
+      "description": "Write content-free JSON diagnostics for each compaction.",
+      "default": true
+    },
+    "eventsDir": {
+      "type": "string",
+      "title": "Compaction event directory",
+      "description": "Defaults to HOME/.claude/cache/fast-jev-compaction/events."
+    },
     "apiKey": {
       "type": "string",
       "title": "TypeSafe API key",

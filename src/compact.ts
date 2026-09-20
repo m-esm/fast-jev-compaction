@@ -379,10 +379,14 @@ export async function compact(
     const state = fitState(messages, calls, resolved, redactor);
     fitted = state;
     batches = batchCalls(candidates, state.tokens, resolved);
-    const answered = await Promise.all(
+    const settled = await Promise.allSettled(
       batches.map((batch) => askBatch(asker, state.state, batch)),
     );
-    for (const map of answered) for (const [id, answer] of map) answers.set(id, answer);
+    // Let every batch finish before recording a failure and its request counts.
+    for (const batch of settled) {
+      if (batch.status === 'rejected') throw batch.reason;
+      for (const [id, answer] of batch.value) answers.set(id, answer);
+    }
   }
 
   const decisions = calls.map((call) =>
