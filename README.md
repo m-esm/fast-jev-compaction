@@ -224,9 +224,15 @@ Four guards, all in the hook:
 
 ## Limitations
 
-- Stored image payloads in native tool records can be measured and removed. MCP
-  tools do not store image bytes in `result`, only their text, so those images
-  remain invisible to the plugin. User-message images also remain invisible.
+- Image payloads are measured and removed through the stored tool record
+  (`result`): `Read` keeps them in `file.base64`, MCP tools as image blocks after
+  their text. A result whose record was stored without its bytes stays
+  invisible, and so do images a person pasted into a user message.
+- Rewriting one result rebuilds its whole message, and a rebuilt message loses
+  every image in it, so a sibling result scored `keep` in the same user message
+  loses its image too.
+- Payload weight is counted in base64 characters, which overstates an image
+  against text. Read the reduction percentage as a gate, not as a token count.
 - Only tool calls and results are candidates; text messages are never removed
   or shortened in the output (they are only abridged in the state Jev sees).
 - Masking is pattern-based. It catches shapes, not meaning: a person's name, a
