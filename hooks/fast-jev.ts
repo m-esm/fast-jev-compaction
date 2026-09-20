@@ -3,6 +3,7 @@ import type {
   PluginOptions,
   Register,
   SessionMessage,
+  SessionCompactResult,
   ToolResultSummary,
   ToolUseSummary,
   TurnCompleteInput,
@@ -450,6 +451,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    const finish = (result: SessionCompactResult) => {
+      if (result.messages && event.trigger !== 'precompute') auto.turnsSinceCompaction = 0;
+      return result;
+    };
+    const fallback = async () => finish(await next(event));
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       // Local, free, and no request: if even a perfect run could not reach the
@@ -462,7 +468,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
             config.minReductionRatio,
           )} minimum; Jev not called)`,
         );
-        return next(event);
+        return fallback();
       }
       // Wrapped rather than passed: the engine's nouns are only ever called
       // in place, never handed around as values.
@@ -483,19 +489,19 @@ export const register: Register = (on: On, options: PluginOptions) => {
           $,
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
-        return next(event);
+        return fallback();
       }
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
       );
-      return { messages };
+      return finish({ messages });
     } catch (error) {
       notify(
         $,
         `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
       );
-      return next(event);
+      return fallback();
     }
   });
 

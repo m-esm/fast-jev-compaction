@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   compactSession,
   decisionLog,
   decisionLogLines,
   initialAutoCompactState,
   noteCompaction,
+  register,
   resolveHookConfig,
   shouldAutoCompact,
   summarize,
@@ -53,6 +54,55 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
     return { status: 200, ok: true, text: JSON.stringify({ answers }) };
   };
 }
+
+function fakeEngine(options: Record<string, unknown> = {}) {
+  const handlers: Record<string, (...args: any[]) => Promise<any>> = {};
+  register(((name: string, handler: any) => { handlers[name] = handler; }) as any, {
+    apiKey: 'fake', gitleaks: false, preserveRecentMessages: 1, ...options,
+  });
+  const $ = {
+    env: { get: vi.fn(async () => undefined) },
+    settings: { read: vi.fn(async () => ({})) },
+    clock: { now: vi.fn(async () => 1789910000000), sleep: vi.fn(async () => {}) },
+    fs: { write: vi.fn(async () => {}) },
+    http: { fetch: vi.fn(jevFetch(() => 0)) },
+    ui: { log: vi.fn(), toast: vi.fn() },
+    session: {
+      id: vi.fn(async () => '12345678-session'),
+      usage: vi.fn(async () => ({ context: { percent: 80 } })),
+      compact: vi.fn(async () => ({ messages: [] })),
+    },
+  };
+  const next = vi.fn(async () => ({ messages: [] }));
+  return { $, next, dispatch: (trigger: string, messages = transcript()) => handlers['session.compact']!($, { trigger, messages }, next),
+    turn: () => handlers['turn.complete']!($, {}, vi.fn(async () => ({}))) };
+}
+
+describe('registered hook cooldown', () => {
+  it.each(['manual', 'auto', 'plugin'])('resets after %s returns Jev messages', async (trigger) => {
+    const engine = fakeEngine();
+    await engine.dispatch(trigger);
+    await engine.turn();
+    await engine.turn();
+    expect(engine.$.session.compact).not.toHaveBeenCalled();
+    await engine.turn();
+    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['manual', 'auto'])('resets after %s built-in fallback returns messages', async (trigger) => {
+    const engine = fakeEngine();
+    await engine.dispatch(trigger, [message('user', 'nothing to prune')]);
+    await engine.turn();
+    expect(engine.$.session.compact).not.toHaveBeenCalled();
+  });
+
+  it('does not reset for precompute', async () => {
+    const engine = fakeEngine();
+    await engine.dispatch('precompute');
+    await engine.turn();
+    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
