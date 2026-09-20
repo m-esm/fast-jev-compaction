@@ -455,7 +455,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (result.messages && event.trigger !== 'precompute') auto.turnsSinceCompaction = 0;
       return result;
     };
-    const fallback = async () => finish(await next(event));
+    const fallback = async (reason: string) => event.trigger === 'plugin'
+      ? { skip: reason }
+      : finish(await next(event));
+    const fallbackLabel = event.trigger === 'plugin' ? 'compaction skipped' : 'fallback to built-in summary';
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       // Local, free, and no request: if even a perfect run could not reach the
@@ -464,11 +467,15 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (ceiling < config.minReductionRatio) {
         notify(
           $,
-          `fallback to built-in summary (at most ${percent(ceiling)} removable, below the ${percent(
+          `${fallbackLabel} (at most ${percent(ceiling)} removable, below the ${percent(
             config.minReductionRatio,
           )} minimum; Jev not called)`,
         );
-        return fallback();
+        return fallback('ceiling_below_min');
+      }
+      if (!config.apiKey) {
+        notify($, `${fallbackLabel} (TYPESAFE_API_KEY is not configured)`);
+        return fallback('no_api_key');
       }
       // Wrapped rather than passed: the engine's nouns are only ever called
       // in place, never handed around as values.
@@ -487,9 +494,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          `${fallbackLabel} (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
-        return fallback();
+        return fallback('reduction_below_min');
       }
       notify(
         $,
@@ -499,9 +506,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
     } catch (error) {
       notify(
         $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
+        `${fallbackLabel} (${error instanceof Error ? error.message : String(error)})`,
       );
-      return fallback();
+      return fallback('jev_error');
     }
   });
 
@@ -516,8 +523,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
         return next(event);
       }
       compacting = true;
-      await $.session.compact();
-      const after = (await $.session.usage()).context.percent ?? before;
+      const result = await $.session.compact();
+      const after = result.skip !== undefined ? before : (await $.session.usage()).context.percent ?? before;
       const previous = auto;
       auto = noteCompaction(auto, before, after, configured);
       if (auto.trigger !== previous.trigger) {

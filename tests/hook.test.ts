@@ -104,6 +104,33 @@ describe('registered hook cooldown', () => {
   });
 });
 
+describe('registered fallback triggers', () => {
+  for (const trigger of ['manual', 'auto', 'plugin']) {
+    it.each(['ceiling_below_min', 'reduction_below_min', 'no_api_key', 'jev_error'])(`${trigger}: %s`, async (reason) => {
+      const engine = fakeEngine(reason === 'no_api_key' ? { apiKey: '' } : {});
+      if (reason === 'reduction_below_min') engine.$.http.fetch.mockImplementation(jevFetch(() => 1));
+      if (reason === 'jev_error') engine.$.http.fetch.mockRejectedValue(new Error('offline'));
+      const out = await engine.dispatch(trigger, reason === 'ceiling_below_min' ? [message('user', 'text')] : transcript());
+      if (trigger === 'plugin') {
+        expect(out).toEqual({ skip: reason });
+        expect(engine.next).not.toHaveBeenCalled();
+      } else {
+        expect(out).toEqual({ messages: [] });
+        expect(engine.next).toHaveBeenCalledTimes(1);
+      }
+    });
+  }
+
+  it('feeds skipped plugin compactions into cooldown and trigger escalation', async () => {
+    const engine = fakeEngine({ cooldownTurns: 0 });
+    engine.$.session.compact.mockImplementation(async () => engine.dispatch('plugin', [message('user', 'text')]));
+    await engine.turn();
+    await engine.turn();
+    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+    expect(engine.$.ui.log.mock.calls.flat().join(' ')).toContain('trigger raised to 85%');
+  });
+});
+
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
