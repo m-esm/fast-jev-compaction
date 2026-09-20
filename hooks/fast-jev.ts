@@ -371,9 +371,10 @@ function notify(
     };
   },
   text: string,
+  silent = false,
 ): void {
   $.ui.log(text);
-  $.ui.toast(text, { timeoutMs: 15_000 });
+  if (!silent) $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
 /**
@@ -470,11 +471,12 @@ export const register: Register = (on: On, options: PluginOptions) => {
           `${fallbackLabel} (at most ${percent(ceiling)} removable, below the ${percent(
             config.minReductionRatio,
           )} minimum; Jev not called)`,
+          event.trigger === 'precompute',
         );
         return fallback('ceiling_below_min');
       }
       if (!config.apiKey) {
-        notify($, `${fallbackLabel} (TYPESAFE_API_KEY is not configured)`);
+        notify($, `${fallbackLabel} (TYPESAFE_API_KEY is not configured)`, event.trigger === 'precompute');
         return fallback('no_api_key');
       }
       // Wrapped rather than passed: the engine's nouns are only ever called
@@ -495,18 +497,21 @@ export const register: Register = (on: On, options: PluginOptions) => {
         notify(
           $,
           `${fallbackLabel} (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          event.trigger === 'precompute',
         );
         return fallback('reduction_below_min');
       }
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
+        event.trigger === 'precompute',
       );
       return finish({ messages });
     } catch (error) {
       notify(
         $,
         `${fallbackLabel} (${error instanceof Error ? error.message : String(error)})`,
+        event.trigger === 'precompute',
       );
       return fallback('jev_error');
     }

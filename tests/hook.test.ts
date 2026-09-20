@@ -131,6 +131,16 @@ describe('registered fallback triggers', () => {
   });
 });
 
+it.each(['success', 'ceiling', 'reduction', 'key', 'error'])('keeps precompute silent on %s', async (path) => {
+  const engine = fakeEngine(path === 'key' ? { apiKey: '' } : {});
+  if (path === 'reduction') engine.$.http.fetch.mockImplementation(jevFetch(() => 1));
+  if (path === 'error') engine.$.http.fetch.mockRejectedValue(new Error('offline'));
+  await engine.dispatch('precompute', path === 'ceiling' ? [message('user', 'text')] : transcript());
+  expect(engine.$.ui.toast).not.toHaveBeenCalled();
+  expect(engine.$.ui.log).toHaveBeenCalled();
+  expect(engine.next).toHaveBeenCalledTimes(path === 'success' ? 0 : 1);
+});
+
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
