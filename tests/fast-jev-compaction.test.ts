@@ -298,6 +298,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Never edit anything under src/generated. Fix the failing test.',
+      '[fast-jev-compaction removed 1 tool call(s) and their results here: Read x1; re-run them if needed]',
       'a.ts looks fine; checking b.ts',
       'tool-2',
       'tool-2',
@@ -307,24 +308,24 @@ describe('decisions', () => {
       'go ahead',
     ]);
     expect(kept[0]).toBe(messages[0]);
-    expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(
+    expect(kept[3]).not.toBe(messages[4]);
+    expect(kept[3]?.toolUses[0]?.text).toMatch(
       new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
     );
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(
+    expect(kept[4]?.toolResults?.[0]?.text).toMatch(
       new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
     );
-    expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[3]).not.toBe(messages[5]);
-    expect(kept[4]).toBe(messages[6]);
-    expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
+    expect(kept[3]).not.toBe(messages[4]);
+    expect(kept[4]).not.toBe(messages[5]);
+    expect(kept[5]).toBe(messages[6]);
+    expect(kept[6]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
 
     const shortMessages = transcript();
     shortMessages[4]!.toolUses[0]!.text = 'y'.repeat(100);
     shortMessages[5]!.toolResults![0]!.text = 'y'.repeat(100);
     const shortKept = applyDecisions(shortMessages, decisions, calls, 300);
-    expect(shortKept[2]).toBe(shortMessages[4]);
-    expect(shortKept[3]).toBe(shortMessages[5]);
+    expect(shortKept[3]).toBe(shortMessages[4]);
+    expect(shortKept[4]).toBe(shortMessages[5]);
   });
 
   it('honours truncateHeadChars, including a zero head', () => {
@@ -344,6 +345,18 @@ describe('decisions', () => {
     expect(noHead[2]?.toolResults?.[0]?.text).toBe(
       `[fast-jev-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
     );
+  });
+
+  it('appends one grouped marker to narration and counts it in charsAfter', async () => {
+    const messages = [message('user', 'start'), message('assistant', 'Checked files.', {
+      toolUses: ['Read', 'Read', 'Grep'].map((tool, i) => ({ tool_use_id: String(i), tool, input: {} })),
+    }), message('user', '', {
+      toolResults: [0, 1, 2].map((i) => ({ tool_use_id: String(i), text: 'x'.repeat(2000) })),
+    })];
+    const out = await compact(messages, fakeJev(() => 0), { preserveRecentMessages: 0 });
+    const marker = '[fast-jev-compaction removed 3 tool call(s) and their results here: Read x2, Grep x1; re-run them if needed]';
+    expect(out.messages).toEqual([messages[0], message('assistant', `Checked files.\n${marker}`)]);
+    expect(out.stats.charsAfter).toBe('startChecked files.\n'.length + marker.length);
   });
 });
 

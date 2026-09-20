@@ -1,1 +1,0 @@
-{"v":1,"ts":"2026-09-20T11:00:00.000Z","sessionId":"12345678-demo","trigger":"auto","model":"jev-latest","outcome":"fallback","reasonCode":"no_api_key","ceilingRatio":0.8,"minReductionRatio":0.25,"thresholds":{"keepResult":0.4,"keepCall":0.15},"messagesBefore":8,"charsBefore":10000,"jev":{"requests":0,"retries":0,"ms":0},"totalMs":2}

@@ -279,10 +279,18 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
+    const dropped = message.toolUses.filter((tool) => actions.get(tool.tool_use_id) === 'drop_call');
+    const counts = new Map<string, number>();
+    for (const tool of dropped) counts.set(tool.tool, (counts.get(tool.tool) ?? 0) + 1);
+    const marker = dropped.length === 0 ? '' :
+      `[fast-jev-compaction removed ${dropped.length} tool call(s) and their results here: ${
+        [...counts].map(([tool, n]) => `${tool} x${n}`).join(', ')
+      }; re-run them if needed]`;
+    const text = marker ? [message.text, marker].filter(Boolean).join('\n') : message.text;
+    if (text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
-    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
+    const rebuilt: Message = { role: message.role, text, toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }

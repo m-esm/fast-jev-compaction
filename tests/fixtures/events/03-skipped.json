@@ -1,1 +1,0 @@
-{"v":1,"ts":"2026-09-20T12:00:00.000Z","sessionId":"abcdef12-demo","trigger":"plugin","model":"jev-latest","outcome":"skipped","reasonCode":"ceiling_below_min","ceilingRatio":0.1,"minReductionRatio":0.25,"thresholds":{"keepResult":0.4,"keepCall":0.15},"messagesBefore":8,"charsBefore":10000,"jev":{"requests":0,"retries":0,"ms":0},"totalMs":1}
