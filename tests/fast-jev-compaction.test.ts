@@ -250,6 +250,7 @@ describe('question batching', () => {
     callIndex: i * 2 + 1,
     resultIndex: i * 2 + 2,
     resultChars: 100,
+    payloadChars: 0,
     isError: false,
     pinned: false,
   }));

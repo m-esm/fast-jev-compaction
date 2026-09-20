@@ -142,6 +142,22 @@ it.each(['success', 'ceiling', 'reduction', 'key', 'error'])('keeps precompute s
 });
 
 describe('persisted hook events', () => {
+  it('passes image-only results through the ceiling check and installs rebuilt text', async () => {
+    const engine = fakeEngine();
+    const messages = transcript();
+    const stored = { type: 'image', file: { base64: 'A'.repeat(10000) } };
+    messages[1]!.toolUses[0]!.result = stored;
+    messages[1]!.toolUses[0]!.text = '';
+    messages[2]!.toolResults![0]!.result = stored;
+    messages[2]!.toolResults![0]!.text = '';
+    engine.$.http.fetch.mockImplementation(jevFetch((name) => name.startsWith('call_') ? 0.9 : 0));
+    const out = await engine.dispatch('plugin', messages);
+    expect(out.messages[2].toolResults[0].text).toContain('binary payload');
+    expect(out.messages[2].toolResults[0]).not.toHaveProperty('result');
+    const event = JSON.parse((engine.$.fs.write.mock.calls[0] as unknown as [string, string])[1]);
+    expect(event.binaryChars).toEqual({ before: 10000, removed: 10000 });
+    expect(event.outcome).toBe('jev');
+  });
   it.each(['manual', 'auto', 'plugin', 'precompute'])('writes exactly one %s dispatch event', async (trigger) => {
     const engine = fakeEngine();
     await engine.dispatch(trigger);

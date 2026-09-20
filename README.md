@@ -194,13 +194,13 @@ party at all, do not run this plugin.
 
 Upstream used one threshold at `0.5` for both decisions. Two problems: the test
 is `keep >= threshold`, so raising the number makes pruning *more* aggressive,
-not less — easy to get backwards; and it treats truncating a result (the
+not less, easy to get backwards; and it treats truncating a result (the
 assistant re-runs the tool) and deleting a call (the record is gone) as the same
 risk.
 
 They are now separate and asymmetric: `keepResultThreshold` 0.4,
 `keepCallThreshold` 0.15. On top of that, a call is never deleted outright when
-its tool had a side effect or its result was an error — it is truncated
+its tool had a side effect or its result was an error, it is truncated
 instead, and reported as `protected`. The old single `keepThreshold` still
 works and sets both.
 
@@ -224,6 +224,9 @@ Four guards, all in the hook:
 
 ## Limitations
 
+- Stored image payloads in native tool records can be measured and removed. MCP
+  tools do not store image bytes in `result`, only their text, so those images
+  remain invisible to the plugin. User-message images also remain invisible.
 - Only tool calls and results are candidates; text messages are never removed
   or shortened in the output (they are only abridged in the state Jev sees).
 - Masking is pattern-based. It catches shapes, not meaning: a person's name, a

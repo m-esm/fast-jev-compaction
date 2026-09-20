@@ -5,6 +5,7 @@ import { compact, droppableRatio } from '../src/compact.js';
 import { JevClient } from '../src/client.js';
 import { buildCompactionEvent } from '../src/events.js';
 import { collectToolCalls } from '../src/state.js';
+import { binaryPayloadChars } from '../src/payload.js';
 import { resolveHookConfig, summarize } from '../hooks/fast-jev.js';
 import type { Message } from '../src/types.js';
 
@@ -22,7 +23,7 @@ function imageChars(value: unknown): number {
 export function parseTranscript(jsonl: string, untilBoundary = 1) {
   if (!Number.isInteger(untilBoundary) || untilBoundary < 1) throw new Error('Boundary must be a positive integer');
   const messages: Message[] = [];
-  const images = { inToolResults: 0, inUserMessages: 0 };
+  const images = { inToolResults: 0, inUserMessages: 0, invisibleInToolResults: 0 };
   let boundaries = 0;
   let invalidRows = 0;
   for (const line of jsonl.split(/\r?\n/)) {
@@ -39,13 +40,19 @@ export function parseTranscript(jsonl: string, untilBoundary = 1) {
     const { role, content } = row.message;
     if (role !== 'user' && role !== 'assistant') continue;
     const message: Message = { role, text: textOf(content), toolUses: [] };
+    const resultBlocks = blocks(content).filter((block) => block.type === 'tool_result');
     for (const block of blocks(content)) {
       if (role === 'assistant' && block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
         message.toolUses.push({ tool_use_id: block.id, tool: block.name, input: object(block.input) ? block.input : {} });
       }
       if (role === 'user' && block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-        (message.toolResults ??= []).push({ tool_use_id: block.tool_use_id, text: textOf(block.content), isError: block.is_error === true });
-        images.inToolResults += imageChars(block.content);
+        // Claude transcripts store the native tool record beside message, not in its blocks.
+        const result = resultBlocks.length === 1 ? row.toolUseResult : undefined;
+        (message.toolResults ??= []).push({ tool_use_id: block.tool_use_id, text: textOf(block.content), isError: block.is_error === true,
+          ...(result === undefined ? {} : { result }) });
+        const base64Chars = imageChars(block.content);
+        images.inToolResults += base64Chars;
+        images.invisibleInToolResults += Math.max(0, base64Chars - binaryPayloadChars(result));
       }
     }
     if (role === 'user') images.inUserMessages += imageChars(content);
@@ -56,6 +63,7 @@ export function parseTranscript(jsonl: string, untilBoundary = 1) {
     const result = results.get(tool.tool_use_id);
     if (result) {
       tool.text = result.text;
+      if (result.result !== undefined) tool.result = result.result;
       if (result.isError) tool.isError = true;
     }
   }
@@ -78,7 +86,8 @@ export function analyzeTranscript(parsed: ReturnType<typeof parseTranscript>) {
     tool.resultChars += call.resultChars;
   }
   const ceilingRatio = droppableRatio(parsed.messages, config);
-  return { config, chars, byTool, ceilingRatio, minReductionRatio: config.minReductionRatio,
+  const payloadChars = collectToolCalls(parsed.messages, 0).reduce((sum, call) => sum + call.payloadChars, 0);
+  return { config, chars, byTool, ceilingRatio, payloadChars, minReductionRatio: config.minReductionRatio,
     verdict: ceilingRatio < config.minReductionRatio ? 'ceiling_below_min: plugin skips; manual/auto fall back' : 'eligible: Jev would be asked if an API key is configured' };
 }
 
@@ -88,6 +97,8 @@ export function formatReplay(parsed: ReturnType<typeof parseTranscript>): string
     `Messages: ${parsed.messages.length}`,
     `Chars: user text ${analysis.chars.userText}; assistant text ${analysis.chars.assistantText}; tool inputs ${analysis.chars.toolInputs}; tool result text ${analysis.chars.toolResultText}`,
     `Base64 image chars outside model-facing text: in tool results ${parsed.images.inToolResults}; in user messages ${parsed.images.inUserMessages}`,
+    `Stored binary payload chars visible to the plugin: ${analysis.payloadChars}`,
+    `Base64 image chars the plugin cannot see: in tool results ${parsed.images.invisibleInToolResults}; in user messages ${parsed.images.inUserMessages}`,
     `droppableRatio: ${analysis.ceilingRatio.toFixed(4)}; configured minimum: ${analysis.minReductionRatio}`,
     `Candidates per tool: ${JSON.stringify(analysis.byTool)}`,
     `Verdict: ${analysis.verdict}`,
@@ -130,6 +141,7 @@ export async function main(args = process.argv.slice(2), print: (text: string) =
   print(summarize(result));
   print(`Per-tool actions: ${JSON.stringify(event.byTool)}`);
   print(`Score histograms: ${JSON.stringify(event.scores)}`);
+  print(`Binary chars: ${JSON.stringify(event.binaryChars)}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -36,6 +36,7 @@ function validEvent(event) {
   if (event.scores !== undefined && (!object(event.scores) || !['keepCall', 'keepResult'].every((key) => Array.isArray(event.scores[key]) && event.scores[key].length === 10 && event.scores[key].every(finite)))) return false;
   if (event.jev !== undefined && (!object(event.jev) || !['requests', 'retries', 'ms'].every((key) => finite(event.jev[key])))) return false;
   if (event.reductionRatio !== undefined && !finite(event.reductionRatio)) return false;
+  if (event.binaryChars !== undefined && (!object(event.binaryChars) || !finite(event.binaryChars.before) || !finite(event.binaryChars.removed))) return false;
   return true;
 }
 
@@ -66,10 +67,13 @@ export function totals(events) {
   const byTool = Object.create(null);
   const scores = { keepCall: Array(10).fill(0), keepResult: Array(10).fill(0) };
   const reductions = [];
+  const binaryChars = { before: 0, removed: 0 };
   for (const event of events) {
     // Auto observations describe the same attempt as the dispatch event.
     if (event.auto) { autoOutcomes[event.outcome] += 1; continue; }
     outcomes[event.outcome] += 1;
+    binaryChars.before += event.binaryChars?.before ?? 0;
+    binaryChars.removed += event.binaryChars?.removed ?? 0;
     if (event.outcome === 'fallback') fallbackReasons[event.reasonCode] = (fallbackReasons[event.reasonCode] ?? 0) + 1;
     if (event.outcome === 'jev' && finite(event.reductionRatio)) reductions.push(event.reductionRatio);
     for (const [name, counts] of Object.entries(event.byTool ?? {})) {
@@ -83,7 +87,7 @@ export function totals(events) {
   reductions.sort((a, b) => a - b);
   const n = reductions.length;
   const medianReduction = n ? (reductions[Math.floor((n - 1) / 2)] + reductions[Math.floor(n / 2)]) / 2 : undefined;
-  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores };
+  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores, binaryChars };
 }
 
 const percent = (number) => finite(number) ? `${(number * 100).toFixed(1)}%` : '-';
@@ -102,6 +106,7 @@ export function formatReport(events, skipped) {
   lines.push('', `Dispatch totals: ${JSON.stringify(sum.outcomes)}`, `Auto observations: ${JSON.stringify(sum.autoOutcomes)}`,
     `Fallback reasons: ${JSON.stringify(sum.fallbackReasons)}`, `Median Jev reduction: ${percent(sum.medianReduction)}`,
     `Per-tool action totals: ${JSON.stringify(sum.byTool)}`, `Score histograms: ${JSON.stringify(sum.scores)}`,
+    `Binary chars: ${JSON.stringify(sum.binaryChars)}`,
     `Skipped unreadable/invalid entries: ${skipped}`);
   return lines.join('\n');
 }

@@ -6,7 +6,7 @@ const fixture = readFileSync('tests/fixtures/transcript.jsonl', 'utf8');
 it('stops at the selected boundary and skips non-session rows and summaries', () => {
   const first = parseTranscript(fixture);
   expect(first.messages).toHaveLength(11);
-  expect(first.images).toEqual({ inToolResults: 5000, inUserMessages: 8 });
+  expect(first.images).toEqual({ inToolResults: 5000, inUserMessages: 8, invisibleInToolResults: 0 });
   expect(first.messages[2]?.toolResults?.[0]?.text).toBe('');
   expect(first.messages[4]?.toolResults?.[0]?.text).toBe('result text');
   expect(first.messages[3]?.toolUses[0]?.text).toBe('result text');
@@ -20,9 +20,22 @@ it('counts only visible text and inputs, and produces a content-free verdict', (
   const analysis = analyzeTranscript(parsed);
   expect(analysis.byTool.Read).toEqual({ candidates: 2, resultChars: 11 });
   expect(analysis.chars.toolResultText).toBe(11);
-  expect(analysis.ceilingRatio).toBe(0);
-  expect(formatReplay(parsed)).toContain('plugin skips');
+  expect(analysis.ceilingRatio).toBeGreaterThan(0.9);
+  expect(analysis.payloadChars).toBe(5000);
+  expect(formatReplay(parsed)).toContain('eligible');
   expect(formatReplay(parsed)).not.toContain('PRIVATE_SENTINEL');
+});
+
+it('reports image bytes as invisible when the stored native record is absent', () => {
+  const withoutRecords = fixture.split('\n').filter(Boolean).map((line) => {
+    const row = JSON.parse(line);
+    delete row.toolUseResult;
+    return JSON.stringify(row);
+  }).join('\n');
+  const parsed = parseTranscript(withoutRecords);
+  expect(parsed.images.invisibleInToolResults).toBe(5000);
+  expect(analyzeTranscript(parsed).payloadChars).toBe(0);
+  expect(formatReplay(parsed)).toContain('plugin skips');
 });
 
 it('joins text blocks, ignores thinking, and skips malformed JSON', () => {

@@ -1,4 +1,4 @@
-import { messageChars, reductionRatio, resolveOptions } from './compact.js';
+import { transcriptChars, reductionRatio, resolveOptions } from './compact.js';
 import { collectToolCalls } from './state.js';
 import { JevHttpError } from './request.js';
 import type { CompactOptions, CompactResult, Message } from './types.js';
@@ -33,6 +33,7 @@ export interface CompactionEvent {
   scores?: Scores;
   jev?: { requests: number; retries: number; ms: number };
   totalMs: number;
+  binaryChars: { before: number; removed: number };
   auto?: { trigger: number; compactions: number; disabledReason?: string };
 }
 
@@ -107,7 +108,11 @@ export function buildCompactionEvent(input: EventInput): CompactionEvent {
     ceilingRatio: input.ceilingRatio, minReductionRatio: input.minReductionRatio,
     thresholds: { keepResult: options.keepResultThreshold, keepCall: options.keepCallThreshold },
     messagesBefore: input.messages.length,
-    charsBefore: input.messages.reduce((sum, message) => sum + messageChars(message), 0),
+    charsBefore: transcriptChars(input.messages),
+    binaryChars: {
+      before: calls.reduce((sum, call) => sum + call.payloadChars, 0),
+      removed: calls.reduce((sum, call) => sum + (decisions.has(call.id) && decisions.get(call.id)?.action !== 'keep' ? call.payloadChars : 0), 0),
+    },
     ...(result ? { messagesAfter: result.stats.messagesAfter, charsAfter: result.stats.charsAfter,
       reductionRatio: reductionRatio(result), stats: result.stats, scores: scoreHistograms(result) } : {}),
     byTool,

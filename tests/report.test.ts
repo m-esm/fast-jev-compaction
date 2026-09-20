@@ -13,6 +13,7 @@ it('filters fixtures, sorts newest last, and merges totals', async () => {
   expect(totals(events)).toMatchObject({ outcomes: { jev: 1, fallback: 1, skipped: 1 }, fallbackReasons: { no_api_key: 1 }, medianReduction: 0.6 });
   expect(totals(events).scores.keepCall).toEqual([1, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
   expect(formatReport(events, 0)).toContain('Median Jev reduction: 60.0%');
+  expect(totals([{ ...events[0], binaryChars: { before: 5000, removed: 5000 } }]).binaryChars).toEqual({ before: 5000, removed: 5000 });
   expect((await loadEvents({ dir, session: '1234', last: 1 })).events[0].outcome).toBe('fallback');
   expect((await loadEvents({ dir, days: 1 }, Date.parse('2026-09-21T10:30:00Z'))).events).toHaveLength(2);
   expect(totals([events[0], { ...events[0], auto: { trigger: 85, compactions: 1 } }]).outcomes.jev).toBe(1);

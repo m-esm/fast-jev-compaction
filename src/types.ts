@@ -12,6 +12,7 @@ export interface ToolUse {
   input: Record<string, unknown>;
   text?: string;
   isError?: boolean;
+  result?: unknown;
 }
 
 /** A tool_result block of a user message. */
@@ -19,6 +20,7 @@ export interface ToolResult {
   tool_use_id: string;
   text: string;
   isError?: boolean;
+  result?: unknown;
 }
 
 /**
@@ -30,6 +32,7 @@ export interface Message {
   text: string;
   toolUses: ToolUse[];
   toolResults?: ToolResult[];
+  result?: unknown;
 }
 
 /** A tool call paired with its result by `tool_use_id`. */
@@ -44,6 +47,7 @@ export interface ToolCall {
   /** Index of the message holding the tool_result block. */
   resultIndex: number;
   resultChars: number;
+  payloadChars: number;
   isError: boolean;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;

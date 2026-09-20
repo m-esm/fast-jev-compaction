@@ -1,5 +1,6 @@
 import { createRedactor, type Redactor } from './redact.js';
 import { noulAnswer } from './request.js';
+import { binaryPayloadChars } from './payload.js';
 import { collectToolCalls, estimateTokens, fitState } from './state.js';
 import type {
   CallAnswer,
@@ -205,6 +206,10 @@ function truncatedResultText(text: string, isError: boolean, headChars: number):
   }; re-run the tool if needed]`;
 }
 
+function removedPayloadText(text: string, payloadChars: number): string {
+  return `${text}\n[fast-jev-compaction removed a ~${Math.ceil(payloadChars / 1024)} KB binary payload (image) from this tool result; re-run the tool if needed]`;
+}
+
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
  * together with its result; a dropped result keeps a bounded head and note.
@@ -218,6 +223,7 @@ export function applyDecisions(
   headChars: number,
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
+  const payloads = new Map(calls.map((call) => [call.tool_use_id, call.payloadChars]));
   const actions = new Map<string, CallDecision['action']>();
   for (const decision of decisions) {
     const call = byId.get(decision.id);
@@ -236,12 +242,13 @@ export function applyDecisions(
       .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
       .map((tool) => {
         if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
+        const payloadChars = payloads.get(tool.tool_use_id) ?? 0;
+        const text = payloadChars > 0 ? removedPayloadText(tool.text ?? '', payloadChars) : truncatedResultText(
           tool.text ?? '',
           tool.isError ?? false,
           headChars,
         );
-        if ((tool.text ?? '') === text) return tool;
+        if (payloadChars === 0 && (tool.text ?? '') === text) return tool;
         const copy: ToolUse = {
           tool_use_id: tool.tool_use_id,
           tool: tool.tool,
@@ -255,8 +262,9 @@ export function applyDecisions(
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
-        return text === result.text
+        const payloadChars = payloads.get(result.tool_use_id) ?? 0;
+        const text = payloadChars > 0 ? removedPayloadText(result.text, payloadChars) : truncatedResultText(result.text, result.isError ?? false, headChars);
+        return payloadChars === 0 && text === result.text
           ? result
           : {
               tool_use_id: result.tool_use_id,
@@ -298,17 +306,30 @@ export function applyDecisions(
 }
 
 /** Characters of text, tool input and tool output a message holds. */
-export function messageChars(message: Message): number {
-  let total = message.text.length;
+export function messageChars(message: Message, payloads = new Map<string, number>()): number {
+  let total = message.text.length + binaryPayloadChars(message.result);
+  const countPayload = (id: string, result: unknown) => {
+    const size = binaryPayloadChars(result);
+    const counted = payloads.get(id) ?? 0;
+    payloads.set(id, Math.max(counted, size));
+    return Math.max(0, size - counted);
+  };
   for (const tool of message.toolUses) {
+    total += countPayload(tool.tool_use_id, tool.result);
     try {
       total += JSON.stringify(tool.input).length;
     } catch {
       total += 20;
     }
   }
-  for (const result of message.toolResults ?? []) total += result.text.length;
+  for (const result of message.toolResults ?? []) total += result.text.length + countPayload(result.tool_use_id, result.result);
   return total;
+}
+
+/** Stored results appear on both sides of a tool pair; charge their payload once. */
+export function transcriptChars(messages: readonly Message[]): number {
+  const payloads = new Map<string, number>();
+  return messages.reduce((sum, message) => sum + messageChars(message, payloads), 0);
 }
 
 /**
@@ -322,7 +343,7 @@ export function droppableRatio(
 ): number {
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
-  const total = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  const total = transcriptChars(messages);
   if (total === 0) return 0;
   const byResultId = new Map<string, number>();
   for (const message of messages) {
@@ -334,7 +355,7 @@ export function droppableRatio(
   for (const call of calls) {
     if (call.pinned) continue;
     const resultChars = byResultId.get(call.tool_use_id) ?? call.resultChars;
-    droppable += Math.max(0, resultChars - resolved.truncateHeadChars);
+    droppable += Math.max(0, resultChars - resolved.truncateHeadChars) + call.payloadChars;
   }
   return droppable / total;
 }
@@ -364,7 +385,7 @@ export async function compact(
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
   const candidates = calls.filter((call) => !call.pinned);
-  const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  const charsBefore = transcriptChars(messages);
 
   const redactor: Redactor = createRedactor({
     level: resolved.redact,
@@ -405,7 +426,7 @@ export async function compact(
       messagesBefore: messages.length,
       messagesAfter: kept.length,
       charsBefore,
-      charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
+      charsAfter: transcriptChars(kept),
       calls: calls.length,
       kept: count(decisions, 'kept'),
       resultsDropped: count(decisions, 'result_dropped'),

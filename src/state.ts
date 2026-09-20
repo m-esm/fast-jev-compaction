@@ -1,4 +1,5 @@
 import { noRedaction, type Redactor } from './redact.js';
+import { binaryPayloadChars } from './payload.js';
 import type {
   CompactionState,
   FittedState,
@@ -87,6 +88,7 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
+        payloadChars: Math.max(binaryPayloadChars(tool.result), binaryPayloadChars(found.result.result)),
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
