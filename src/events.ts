@@ -100,7 +100,7 @@ export function gateEvent(input: GateEvent): GateEvent {
     boundary: probability(input.boundary), needsRecent: probability(input.needsRecent),
     ...(choice && /^(u[1-9][0-9]*|none|all_done)$/.test(choice) && confidence !== undefined ? { taskStart: { choice, confidence } } : {}),
     ...(Number.isFinite(input.tail) ? { tail: input.tail } : {}),
-    reason: ['hard_ceiling', 'boundary', 'in_progress', 'needs_recent', 'below_floor', 'jev_unavailable'].includes(input.reason) ? input.reason : 'jev_unavailable',
+    reason: ['hard_ceiling', 'boundary', 'all_done', 'in_progress', 'needs_recent', 'below_floor', 'jev_unavailable'].includes(input.reason) ? input.reason : 'jev_unavailable',
     model: /^jev-[a-zA-Z0-9._-]{1,80}$/.test(input.model) ? input.model : 'unknown',
     ms: Number.isFinite(input.ms) ? Math.max(0, input.ms) : 0,
   };

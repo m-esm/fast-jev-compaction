@@ -18,7 +18,7 @@ export const GATE_DEFAULTS = {
 
 export type GateConfig = CompactOptions & typeof GATE_DEFAULTS & { compactAtPercent?: number };
 export type GateOptions = Partial<GateConfig> & { contextPercent?: number };
-export type GateReason = 'hard_ceiling' | 'boundary' | 'in_progress' | 'needs_recent' | 'below_floor' | 'jev_unavailable';
+export type GateReason = 'hard_ceiling' | 'boundary' | 'all_done' | 'in_progress' | 'needs_recent' | 'below_floor' | 'jev_unavailable';
 export type GateEntry = HistoryEntry & { id?: string };
 export type GateState = { context: string; goal: string; contextPercent: number; length: number; first?: GateEntry; window: GateEntry[] };
 export type GateScores = { boundary?: number; needsRecent?: number; taskStart?: { choice: string; confidence: number } };
@@ -120,8 +120,9 @@ export function decideGate(answers: JevResponse['answers'] | undefined, percent:
   if (percent >= config.hardCeilingPercent) return { compact: true, reason: 'hard_ceiling', tail, scores };
   if (!answers) return { compact: percent >= (config.compactAtPercent ?? 60), reason: 'jev_unavailable', tail, scores };
   if (scores.needsRecent! > config.needsRecentThreshold) return { compact: false, reason: 'needs_recent', tail, scores };
-  if (scores.boundary! < config.boundaryThreshold) return { compact: false, reason: 'in_progress', tail, scores };
-  return { compact: true, reason: 'boundary', tail, scores };
+  const nothingInProgress = scores.taskStart?.choice === 'all_done' && scores.taskStart.confidence >= config.cutConfidence;
+  if (scores.boundary! < config.boundaryThreshold && !nothingInProgress) return { compact: false, reason: 'in_progress', tail, scores };
+  return { compact: true, reason: nothingInProgress && scores.boundary! < config.boundaryThreshold ? 'all_done' : 'boundary', tail, scores };
 }
 
 export async function evaluateGate(messages: readonly Message[], percent: number, options: GateOptions, asker?: JevAsker): Promise<GateVerdict & { model?: string }> {

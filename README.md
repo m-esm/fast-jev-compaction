@@ -273,9 +273,13 @@ Below the floor there is no request. The request asks three independent question
 - Will the next turn need recent tool outputs verbatim?
 - Which recent user prompt began the task currently in progress?
 
-Compaction proceeds when the boundary probability is at least
-`boundaryThreshold` (0.6) and the recent-output probability is at most
-`needsRecentThreshold` (0.4). At `hardCeilingPercent` (80), it proceeds regardless
+Compaction proceeds when the recent-output probability is at most
+`needsRecentThreshold` (0.4) and either the boundary probability is at least
+`boundaryThreshold` (0.6) or the task-start choice is `all_done` with confidence
+at least `cutConfidence` (0.5). The second route exists because on the first
+live sessions the boundary score sat near 0.45 on turns that closed nothing
+while `all_done` came back at 0.6 to 0.8 for the same turns; a confident
+"nothing is in progress" is a boundary. At `hardCeilingPercent` (80), it proceeds regardless
 of those scores once the cheap guards pass. Missing credentials, failed requests
 and invalid responses fall back to the numeric `compactAtPercent` trigger (60).
 The hard ceiling still applies when Jev is unavailable. Set `gate: false` to

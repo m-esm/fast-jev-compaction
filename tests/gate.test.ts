@@ -62,6 +62,13 @@ describe('gate verdicts', () => {
     expect(decideGate(undefined, 80, state)).toMatchObject({ compact: true, reason: 'hard_ceiling' });
   });
 
+  it('treats a confident all_done answer as a boundary even when the boundary score is low', () => {
+    expect(decideGate(answers(0.45, 0.05, 'all_done', 0.7), 65, state)).toMatchObject({ compact: true, reason: 'all_done', tail: 6 });
+    expect(decideGate(answers(0.45, 0.05, 'all_done', 0.4), 65, state)).toMatchObject({ compact: false, reason: 'in_progress' });
+    expect(decideGate(answers(0.45, 0.6, 'all_done', 0.7), 65, state)).toMatchObject({ compact: false, reason: 'needs_recent' });
+    expect(decideGate(answers(0.9, 0.05, 'all_done', 0.7), 65, state).reason).toBe('boundary');
+  });
+
   it('computes the task tail, preserves the default for none and low confidence, and clamps both ends', () => {
     expect(decideGate(answers(0.9, 0.1, 'u1'), 65, state).tail).toBe(24);
     expect(decideGate(answers(), 65, state).tail).toBeUndefined();
