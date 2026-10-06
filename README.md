@@ -299,7 +299,11 @@ the same clamp. These gate defaults are **untuned placeholders**, collected in
 A compaction that frees less than `minPercentDrop` (5) points raises the
 trigger above the resulting context level: 82% to 80% raises it to 85%.
 At 95% it disables further plugin attempts for the session. Waiting on Jev's
-verdict does not spend the cap or reset cooldown.
+verdict does not spend the cap or reset cooldown. The context level after a
+compaction is only known once the next API response reports it, so the hook
+measures what a compaction freed at the next turn end, not right after the
+queued command resolves; the `-auto` observation of the compacting turn leaves
+`contextPercentAfter` out, and the escalation, if any, is logged one turn later.
 
 The auto path calls `$.command.run({ command: 'compact' })` after `next(event)`
 in an asynchronous continuation, so the turn hook returns immediately. A probe

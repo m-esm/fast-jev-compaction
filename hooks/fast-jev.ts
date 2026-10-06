@@ -502,9 +502,33 @@ type HookState = {
   auto: AutoCompactState;
   compacting: boolean;
   pending?: PendingGate;
+  unsettledBefore?: number;
   gitleaks: GitleaksState;
   events: EventState;
 };
+
+function applyCompactionOutcome($: CoreEngineInterface, state: HookState, before: number, after: number): void {
+  const configured = state.events.configured;
+  const previous = state.auto;
+  state.auto = noteCompaction(state.auto, before, after, configured);
+  if (state.auto.trigger !== previous.trigger) {
+    $.ui.log(`auto-compaction trigger raised to ${state.auto.trigger}% (${before}% → ${after}%, under the ${configured.minPercentDrop}-point minimum)`);
+  }
+  if (state.auto.disabledReason && !previous.disabledReason) {
+    notify($, `auto-compaction disabled for this session: ${state.auto.disabledReason}`, true);
+  }
+}
+
+function settleCompaction($: CoreEngineInterface, state: HookState, percentNow: number): void {
+  if (state.unsettledBefore === undefined) return;
+  const before = state.unsettledBefore;
+  state.unsettledBefore = undefined;
+  const counted = { ...state.auto, compactions: state.auto.compactions - 1 };
+  const kept = state.auto.turnsSinceCompaction;
+  state.auto = counted;
+  applyCompactionOutcome($, state, before, percentNow);
+  state.auto = { ...state.auto, turnsSinceCompaction: kept };
+}
 
 async function autoCompact($: CoreEngineInterface, state: HookState): Promise<void> {
   const configured = state.events.configured;
@@ -519,6 +543,7 @@ async function autoCompact($: CoreEngineInterface, state: HookState): Promise<vo
   try {
     before = await usage($);
     if (before === undefined) return;
+    settleCompaction($, state, before);
     const guard = shouldAutoCompact(state.auto, before, configured);
     if (!guard.compact) {
       if (guard.reason) $.ui.log(guard.reason);
@@ -560,14 +585,12 @@ async function autoCompact($: CoreEngineInterface, state: HookState): Promise<vo
       auto: { trigger: state.auto.trigger, compactions: state.auto.compactions } }, 'gate');
     await $.command.run({ command: 'compact' });
     const recorded = state.events.pluginEvent as CompactionEvent | undefined;
-    after = recorded?.outcome === 'skipped' ? before : await usage($) ?? before;
-    const previous = state.auto;
-    state.auto = noteCompaction(state.auto, before, after, configured);
-    if (state.auto.trigger !== previous.trigger) {
-      $.ui.log(`auto-compaction trigger raised to ${state.auto.trigger}% (${before}% → ${after}%, under the ${configured.minPercentDrop}-point minimum)`);
-    }
-    if (state.auto.disabledReason && !previous.disabledReason) {
-      notify($, `auto-compaction disabled for this session: ${state.auto.disabledReason}`, true);
+    if (recorded?.outcome === 'skipped') {
+      after = before;
+      applyCompactionOutcome($, state, before, before);
+    } else {
+      state.auto = { ...state.auto, compactions: state.auto.compactions + 1, turnsSinceCompaction: 0 };
+      state.unsettledBefore = before;
     }
   } catch (error) {
     failure = error;
@@ -581,7 +604,7 @@ async function autoCompact($: CoreEngineInterface, state: HookState): Promise<vo
           outcome: attempted && !failure ? 'fallback' : 'skipped', reasonCode: failure ? 'error' : attempted ? 'ok' : 'gate_wait',
           ceilingRatio: 0, minReductionRatio: configured.minReductionRatio, options: configured, messages, totalMs });
         await persist($, state.events, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
-          ...(gate ? { gate } : {}), contextPercentBefore: before, contextPercentAfter: after ?? before, totalMs,
+          ...(gate ? { gate } : {}), contextPercentBefore: before, ...(after !== undefined ? { contextPercentAfter: after } : {}), totalMs,
           auto: { trigger: state.auto.trigger, compactions: state.auto.compactions, ...(state.auto.disabledReason ? { disabledReason: state.auto.disabledReason } : {}) } }, 'auto');
       }
     } finally {

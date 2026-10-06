@@ -141,6 +141,35 @@ describe('registered gate', () => {
     await new Promise(setImmediate);
   });
 
+  it('measures what a compaction freed at the next turn end, not right after the queued command', async () => {
+    const engine = fakeEngine({ gate: true, minReductionRatio: 0, cooldownTurns: 0 });
+    engine.$.http.fetch.mockImplementation(gateFetch(0.9, 0.1, 'u1'));
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 70 } });
+    engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', transcript()));
+    await engine.turn();
+    await new Promise(setImmediate);
+    expect(autoEvents(engine).at(-1)).toMatchObject({ outcome: 'jev', contextPercentBefore: 70, auto: { trigger: 40, compactions: 1 } });
+    expect(autoEvents(engine).at(-1)!.contextPercentAfter).toBeUndefined();
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 35 } });
+    await engine.turn();
+    await new Promise(setImmediate);
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
+    expect(engine.$.ui.log).not.toHaveBeenCalledWith(expect.stringContaining('trigger raised'));
+  });
+
+  it('raises the trigger at the next turn end when the fill did not drop', async () => {
+    const engine = fakeEngine({ gate: true, minReductionRatio: 0, cooldownTurns: 0 });
+    engine.$.http.fetch.mockImplementation(gateFetch(0.9, 0.1, 'u1'));
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 70 } });
+    engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', transcript()));
+    await engine.turn();
+    await new Promise(setImmediate);
+    await engine.turn();
+    await new Promise(setImmediate);
+    expect(engine.$.ui.log).toHaveBeenCalledWith(expect.stringContaining('trigger raised to 75%'));
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps user manual fallback and suppresses built-in fallback for a queued request', async () => {
     const engine = fakeEngine({ gate: true });
     engine.$.http.fetch.mockImplementation(gateFetch());

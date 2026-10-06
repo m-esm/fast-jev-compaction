@@ -9,7 +9,7 @@
       "name": "fast-jev-compaction",
       "source": "./",
       "description": "Verbatim Jev-guided compaction for Claude Code sessions, with PII masking and auto-compaction guards.",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "license": "MIT"
     }
   ]
