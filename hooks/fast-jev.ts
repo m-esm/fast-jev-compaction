@@ -553,6 +553,11 @@ async function autoCompact($: CoreEngineInterface, state: HookState): Promise<vo
     }
     state.pending = { tail, lengthAtDecision: messages.length, gate };
     attempted = true;
+    await persist($, state.events, { ...buildCompactionEvent({ ts: '', sessionId: '', trigger: 'plugin', model: configured.model,
+      outcome: 'skipped', reasonCode: 'gate_go', ceilingRatio: 0, minReductionRatio: configured.minReductionRatio,
+      options: configured, messages, totalMs: Math.max(0, await now($) - started) }),
+      ...(gate ? { gate } : {}), contextPercentBefore: before,
+      auto: { trigger: state.auto.trigger, compactions: state.auto.compactions } }, 'gate');
     await $.command.run({ command: 'compact' });
     const recorded = state.events.pluginEvent as CompactionEvent | undefined;
     after = recorded?.outcome === 'skipped' ? before : await usage($) ?? before;

@@ -336,9 +336,12 @@ describe('persisted hook events', () => {
     engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', [message('user', 'text')]));
     await engine.turn();
     const writes = engine.$.fs.write.mock.calls as unknown as [string, string][];
-    expect(writes).toHaveLength(2);
-    expect(writes[1]![0]).toMatch(/-auto.json$/);
-    expect(JSON.parse(writes[1]![1])).toMatchObject({ trigger: 'plugin', outcome: 'skipped', reasonCode: 'ceiling_below_min',
+    expect(writes).toHaveLength(3);
+    expect(writes[0]![0]).toMatch(/-gate.json$/);
+    expect(JSON.parse(writes[0]![1])).toMatchObject({ trigger: 'plugin', outcome: 'skipped', reasonCode: 'gate_go',
+      contextPercentBefore: 80, auto: { trigger: 60, compactions: 0 } });
+    expect(writes[2]![0]).toMatch(/-auto.json$/);
+    expect(JSON.parse(writes[2]![1])).toMatchObject({ trigger: 'plugin', outcome: 'skipped', reasonCode: 'ceiling_below_min',
       contextPercentBefore: 80, contextPercentAfter: 80, auto: { trigger: 85, compactions: 1 } });
   });
 

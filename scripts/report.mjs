@@ -29,7 +29,7 @@ function validEvent(event) {
   if (!object(event) || event.v !== 1 || !Number.isFinite(Date.parse(event.ts)) ||
       !['sessionId', 'trigger', 'model'].every((key) => typeof event[key] === 'string') ||
       !['jev', 'fallback', 'skipped'].includes(event.outcome) ||
-      !['ok', 'ceiling_below_min', 'reduction_below_min', 'no_api_key', 'jev_error', 'error', 'gate_wait'].includes(event.reasonCode) ||
+      !['ok', 'ceiling_below_min', 'reduction_below_min', 'no_api_key', 'jev_error', 'error', 'gate_wait', 'gate_go'].includes(event.reasonCode) ||
       !['ceilingRatio', 'minReductionRatio', 'messagesBefore', 'charsBefore', 'totalMs'].every((key) => finite(event[key])) ||
       !object(event.thresholds) || !finite(event.thresholds.keepResult) || !finite(event.thresholds.keepCall)) return false;
   if (event.byTool !== undefined && (!object(event.byTool) || !Object.values(event.byTool).every((tool) => object(tool) && actionKeys.every((key) => finite(tool[key]))))) return false;

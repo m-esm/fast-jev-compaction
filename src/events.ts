@@ -4,7 +4,7 @@ import { JevHttpError } from './request.js';
 import type { CompactOptions, CompactResult, Message } from './types.js';
 import type { GateReason, GateScores } from './gate.js';
 
-export type ReasonCode = 'ok' | 'ceiling_below_min' | 'reduction_below_min' | 'no_api_key' | 'jev_error' | 'error' | 'gate_wait';
+export type ReasonCode = 'ok' | 'ceiling_below_min' | 'reduction_below_min' | 'no_api_key' | 'jev_error' | 'error' | 'gate_wait' | 'gate_go';
 export type GateEvent = GateScores & { tail?: number; reason: GateReason; model: string; ms: number };
 export type Outcome = 'jev' | 'fallback' | 'skipped';
 export type ToolTotals = { keep: number; drop_result: number; protected: number; drop_call: number; pinned: number; resultChars: number };
@@ -48,6 +48,7 @@ export const REASONS: Record<ReasonCode, string> = {
   jev_error: 'Jev request or response processing failed',
   error: 'Compaction failed',
   gate_wait: 'Gate deferred compaction',
+  gate_go: 'Gate requested compaction',
 };
 
 /** Never copy arbitrary exception text: upstream responses may echo private input. */
