@@ -2,8 +2,10 @@ import { transcriptChars, reductionRatio, resolveOptions } from './compact.js';
 import { collectToolCalls } from './state.js';
 import { JevHttpError } from './request.js';
 import type { CompactOptions, CompactResult, Message } from './types.js';
+import type { GateReason, GateScores } from './gate.js';
 
-export type ReasonCode = 'ok' | 'ceiling_below_min' | 'reduction_below_min' | 'no_api_key' | 'jev_error' | 'error';
+export type ReasonCode = 'ok' | 'ceiling_below_min' | 'reduction_below_min' | 'no_api_key' | 'jev_error' | 'error' | 'gate_wait';
+export type GateEvent = GateScores & { tail?: number; reason: GateReason; model: string; ms: number };
 export type Outcome = 'jev' | 'fallback' | 'skipped';
 export type ToolTotals = { keep: number; drop_result: number; protected: number; drop_call: number; pinned: number; resultChars: number };
 export type Scores = { keepCall: number[]; keepResult: number[] };
@@ -35,6 +37,7 @@ export interface CompactionEvent {
   totalMs: number;
   binaryChars: { before: number; removed: number };
   auto?: { trigger: number; compactions: number; disabledReason?: string };
+  gate?: GateEvent;
 }
 
 export const REASONS: Record<ReasonCode, string> = {
@@ -44,6 +47,7 @@ export const REASONS: Record<ReasonCode, string> = {
   no_api_key: 'TYPESAFE_API_KEY is not configured',
   jev_error: 'Jev request or response processing failed',
   error: 'Compaction failed',
+  gate_wait: 'Gate deferred compaction',
 };
 
 /** Never copy arbitrary exception text: upstream responses may echo private input. */
@@ -84,6 +88,21 @@ export interface EventInput {
   jev?: CompactionEvent['jev'];
   totalMs: number;
   auto?: CompactionEvent['auto'];
+  gate?: GateEvent;
+}
+
+export function gateEvent(input: GateEvent): GateEvent {
+  const probability = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
+  const choice = input.taskStart?.choice;
+  const confidence = probability(input.taskStart?.confidence);
+  return {
+    boundary: probability(input.boundary), needsRecent: probability(input.needsRecent),
+    ...(choice && /^(u[1-9][0-9]*|none|all_done)$/.test(choice) && confidence !== undefined ? { taskStart: { choice, confidence } } : {}),
+    ...(Number.isFinite(input.tail) ? { tail: input.tail } : {}),
+    reason: ['hard_ceiling', 'boundary', 'in_progress', 'needs_recent', 'below_floor', 'jev_unavailable'].includes(input.reason) ? input.reason : 'jev_unavailable',
+    model: /^jev-[a-zA-Z0-9._-]{1,80}$/.test(input.model) ? input.model : 'unknown',
+    ms: Number.isFinite(input.ms) ? Math.max(0, input.ms) : 0,
+  };
 }
 
 /** Explicit projection only. Transcripts, inputs, outputs and exceptions never enter the event. */
@@ -120,6 +139,7 @@ export function buildCompactionEvent(input: EventInput): CompactionEvent {
     ...(input.contextPercentAfter === undefined ? {} : { contextPercentAfter: input.contextPercentAfter }),
     ...(input.jev ? { jev: { requests: input.jev.requests, retries: input.jev.retries, ms: input.jev.ms } } : {}),
     totalMs: input.totalMs,
+    ...(input.gate ? { gate: gateEvent(input.gate) } : {}),
     ...(input.auto ? { auto: { trigger: input.auto.trigger, compactions: input.auto.compactions,
       ...(input.auto.disabledReason ? { disabledReason: 'compaction stopped freeing context' } : {}) } } : {}),
   };

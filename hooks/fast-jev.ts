@@ -11,10 +11,11 @@ import type {
 } from 'claude-code';
 
 import { compact, droppableRatio, reductionRatio, resolveOptions } from '../src/compact.js';
+import { GATE_DEFAULTS, clampGateTail, evaluateGate, type GateConfig } from '../src/gate.js';
 import { scanForSecrets, type GitleaksOptions, type ProcessRunner } from '../src/gitleaks.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import { JevNetworkError, withRetry, type RetryOptions } from '../src/retry.js';
-import { buildCompactionEvent, eventReason, type CompactionEvent, type EventInput, type ReasonCode } from '../src/events.js';
+import { buildCompactionEvent, eventReason, gateEvent, type GateEvent, type CompactionEvent, type EventInput, type ReasonCode } from '../src/events.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -56,7 +57,7 @@ export type HookFetchResponse = {
 /** The shape of `$.http.fetch`, so the hook can be driven without an engine. */
 export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetchResponse>;
 
-export type HookConfig = CompactOptions & {
+export type HookConfig = CompactOptions & GateConfig & {
   apiKey?: string;
   /**
    * Scan the state with gitleaks before sending it. On by default and skipped
@@ -101,6 +102,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
   }
   const config: HookConfig = {
+    ...GATE_DEFAULTS,
     ...(numbers as Partial<CompactOptions>),
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
     minReductionRatio: optionNumber(
@@ -125,6 +127,10 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     ...(optionString(options, 'eventsDir') ? { eventsDir: optionString(options, 'eventsDir') } : {}),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
   };
+  config.gate = options['gate'] !== false;
+  for (const key of ['gateFloorPercent', 'hardCeilingPercent', 'boundaryThreshold', 'needsRecentThreshold', 'cutConfidence', 'gateWindowMessages', 'gateMaxTail', 'gateMaxStateTokens'] as const) {
+    config[key] = optionNumber(options, key, GATE_DEFAULTS[key]);
+  }
   const gitleaksBinary = optionString(options, 'gitleaksBinary');
   if (gitleaksBinary) config.gitleaksBinary = gitleaksBinary;
   const gitleaksConfig = optionString(options, 'gitleaksConfig');
@@ -491,14 +497,108 @@ async function persist($: CoreEngineInterface, state: EventState, input: Omit<Ev
   }
 }
 
+type PendingGate = { tail?: number; lengthAtDecision: number; gate?: GateEvent };
+type HookState = {
+  auto: AutoCompactState;
+  compacting: boolean;
+  pending?: PendingGate;
+  gitleaks: GitleaksState;
+  events: EventState;
+};
+
+async function autoCompact($: CoreEngineInterface, state: HookState): Promise<void> {
+  const configured = state.events.configured;
+  let before: number | undefined;
+  let after: number | undefined;
+  let started = 0;
+  let attempted = false;
+  let evaluated = false;
+  let failure: unknown;
+  let gate: GateEvent | undefined;
+  let messages: SessionMessage[] = [];
+  try {
+    before = await usage($);
+    if (before === undefined) return;
+    const guard = shouldAutoCompact(state.auto, before, configured);
+    if (!guard.compact) {
+      if (guard.reason) $.ui.log(guard.reason);
+      return;
+    }
+    evaluated = true;
+    started = await now($);
+    state.events.pluginEvent = undefined;
+    let tail: number | undefined;
+    if (configured.gate) {
+      let verdict;
+      try {
+        messages = await $.session.messages();
+        const config = { ...configured, apiKey: await getApiKey($, configured) };
+        const scanned = await withScannedSecrets(messages, config, (argv, init) => $.process.run(argv, init), state.gitleaks);
+        if (scanned.note) $.ui.log(scanned.note);
+        verdict = await evaluateGate(messages, before, scanned.config, config.apiKey ? jevAsker(async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          return { status: response.status, ok: response.ok, text: response.text };
+        }, config.apiKey, config.model) : undefined);
+      } catch {
+        verdict = await evaluateGate(messages, before, configured);
+      }
+      gate = gateEvent({ ...verdict.scores, tail: verdict.tail, reason: verdict.reason,
+        model: verdict.model ?? configured.model, ms: Math.max(0, await now($) - started) });
+      tail = verdict.tail;
+      if (verdict.reason === 'jev_unavailable') {
+        $.ui.log('auto-compaction gate unavailable; using numeric fallback');
+        const fallback = shouldAutoCompact({ ...state.auto, trigger: Math.max(state.auto.trigger, configured.compactAtPercent) }, before, configured);
+        if (!fallback.compact && before < configured.hardCeilingPercent) return;
+      } else if (!verdict.compact) return;
+    }
+    state.pending = { tail, lengthAtDecision: messages.length, gate };
+    attempted = true;
+    await $.command.run({ command: 'compact' });
+    const recorded = state.events.pluginEvent as CompactionEvent | undefined;
+    after = recorded?.outcome === 'skipped' ? before : await usage($) ?? before;
+    const previous = state.auto;
+    state.auto = noteCompaction(state.auto, before, after, configured);
+    if (state.auto.trigger !== previous.trigger) {
+      $.ui.log(`auto-compaction trigger raised to ${state.auto.trigger}% (${before}% → ${after}%, under the ${configured.minPercentDrop}-point minimum)`);
+    }
+    if (state.auto.disabledReason && !previous.disabledReason) {
+      notify($, `auto-compaction disabled for this session: ${state.auto.disabledReason}`, true);
+    }
+  } catch (error) {
+    failure = error;
+    if (attempted && before !== undefined) state.auto = noteCompaction(state.auto, before, before, configured);
+    $.ui.log('auto-compact skipped (compaction failed)');
+  } finally {
+    try {
+      if (evaluated) {
+        const totalMs = Math.max(0, await now($) - started);
+        const base = state.events.pluginEvent ?? buildCompactionEvent({ ts: '', sessionId: '', trigger: 'plugin', model: configured.model,
+          outcome: attempted && !failure ? 'fallback' : 'skipped', reasonCode: failure ? 'error' : attempted ? 'ok' : 'gate_wait',
+          ceilingRatio: 0, minReductionRatio: configured.minReductionRatio, options: configured, messages, totalMs });
+        await persist($, state.events, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
+          ...(gate ? { gate } : {}), contextPercentBefore: before, contextPercentAfter: after ?? before, totalMs,
+          auto: { trigger: state.auto.trigger, compactions: state.auto.compactions, ...(state.auto.disabledReason ? { disabledReason: state.auto.disabledReason } : {}) } }, 'auto');
+      }
+    } finally {
+      state.pending = undefined;
+      state.compacting = false;
+    }
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
-  let auto = initialAutoCompactState(configured);
   const gitleaks: GitleaksState = {};
-  let compacting = false;
   const eventState: EventState = { configured, lastEventMs: 0, pluginEvent: undefined };
+  const state: HookState = { auto: { ...initialAutoCompactState(configured), trigger: configured.gate ? configured.gateFloorPercent : configured.compactAtPercent },
+    compacting: false, gitleaks, events: eventState };
 
   on('session.compact', async ($, event, next) => {
+    const pending = event.trigger === 'manual' ? state.pending : undefined;
+    if (pending) state.pending = undefined;
+    const plugin = event.trigger === 'plugin' || pending !== undefined;
+    const runConfig = pending?.tail === undefined ? configured : { ...configured,
+      preserveRecentMessages: clampGateTail(pending.tail + event.messages.length - pending.lengthAtDecision, configured) };
     const started = await now($);
     const contextPercentBefore = await usage($);
     const metrics = { requests: 0, retries: 0, ms: 0 };
@@ -506,18 +606,18 @@ export const register: Register = (on: On, options: PluginOptions) => {
     let result: CompactResult | undefined;
     let reasonCode: ReasonCode = 'error';
     let failure: unknown;
-    let outcome: CompactionEvent['outcome'] = event.trigger === 'plugin' ? 'skipped' : 'fallback';
+    let outcome: CompactionEvent['outcome'] = plugin ? 'skipped' : 'fallback';
     const finish = (result: SessionCompactResult) => {
-      if (result.messages && event.trigger !== 'precompute') auto.turnsSinceCompaction = 0;
+      if (result.messages && event.trigger !== 'precompute') state.auto.turnsSinceCompaction = 0;
       return result;
     };
-    const fallbackLabel = event.trigger === 'plugin' ? 'compaction skipped' : 'fallback to built-in summary';
+    const fallbackLabel = plugin ? 'compaction skipped' : 'fallback to built-in summary';
     try {
       try {
-        ceiling = droppableRatio(event.messages, configured);
+        ceiling = droppableRatio(event.messages, runConfig);
         if (ceiling < configured.minReductionRatio) reasonCode = 'ceiling_below_min';
         else {
-          const config = { ...configured, apiKey: await getApiKey($, configured) };
+          const config = { ...runConfig, apiKey: await getApiKey($, runConfig) };
           if (!config.apiKey) reasonCode = 'no_api_key';
           else {
             const scanned = await withScannedSecrets(event.messages, config,
@@ -534,7 +634,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
               for (const line of decisionLogLines(result)) $.ui.log(line);
               if (reasonCode === 'ok') {
                 outcome = 'jev';
-                notify($, `kept ${compacted.messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, event.trigger === 'precompute');
+                notify($, `kept ${compacted.messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`, event.trigger === 'precompute' || plugin);
                 return finish({ messages: compacted.messages });
               }
             } catch (error) {
@@ -551,8 +651,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
       // A plugin-triggered skip is something nobody asked for: log it, do not toast.
       notify($, `${fallbackLabel} (${eventReason(reasonCode, failure)}${result ? `; ${summarize(result)}` : ''})`,
-        event.trigger === 'precompute' || event.trigger === 'plugin');
-      if (event.trigger === 'plugin') return { skip: reasonCode };
+        event.trigger === 'precompute' || plugin);
+      if (plugin) return { skip: reasonCode };
       // Delegate once, outside the Jev catch: a core failure is not a Jev retry.
       try {
         const fallback = await next(event);
@@ -564,64 +664,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
         throw error;
       }
     } finally {
-      await persist($, eventState, { trigger: event.trigger, agentId: event.agentId, model: configured.model,
+      if (state.pending === pending) state.pending = undefined;
+      const record = buildCompactionEvent({ ts: '', sessionId: '', trigger: plugin ? 'plugin' : event.trigger, agentId: event.agentId, model: configured.model,
         outcome, reasonCode, error: failure, ceilingRatio: ceiling,
-        minReductionRatio: configured.minReductionRatio, options: configured, messages: event.messages,
+        minReductionRatio: configured.minReductionRatio, options: runConfig, messages: event.messages, gate: pending?.gate,
         result, contextPercentBefore, jev: metrics, totalMs: Math.max(0, await now($) - started) });
+      if (plugin) eventState.pluginEvent = record;
+      await persist($, eventState, record);
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (compacting) return next(event);
-    auto = { ...auto, turnsSinceCompaction: auto.turnsSinceCompaction + 1 };
-    let before: number | undefined;
-    let after: number | undefined;
-    let started = 0;
-    let attempted = false;
-    let skipped = false;
-    let failure: unknown;
-    try {
-      before = (await $.session.usage()).context.percent ?? 0;
-      const verdict = shouldAutoCompact(auto, before, configured);
-      if (!verdict.compact) {
-        if (verdict.reason) $.ui.log(verdict.reason);
-        return next(event);
-      }
-      compacting = true;
-      attempted = true;
-      eventState.pluginEvent = undefined;
-      started = await now($);
-      const result = await $.session.compact();
-      skipped = result.skip !== undefined;
-      after = skipped ? before : await usage($) ?? before;
-      const previous = auto;
-      auto = noteCompaction(auto, before, after, configured);
-      if (auto.trigger !== previous.trigger) {
-        $.ui.log(
-          `auto-compaction trigger raised to ${auto.trigger}% (${before}% → ${after}%, under the ${configured.minPercentDrop}-point minimum)`,
-        );
-      }
-      if (auto.disabledReason && !previous.disabledReason) {
-        notify($, `auto-compaction disabled for this session: ${auto.disabledReason}`);
-      }
-    } catch (error) {
-      failure = error;
-      if (attempted && before !== undefined) auto = noteCompaction(auto, before, before, configured);
-      $.ui.log('auto-compact skipped (compaction failed)');
-    } finally {
-      if (attempted) {
-        const recorded = eventState.pluginEvent as CompactionEvent | undefined;
-        const totalMs = Math.max(0, await now($) - started);
-        const base = recorded ?? buildCompactionEvent({ ts: '', sessionId: '', trigger: 'plugin', model: configured.model,
-          outcome: skipped || failure ? 'skipped' : 'fallback', reasonCode: failure ? 'error' : 'ok',
-          ceilingRatio: 0, minReductionRatio: configured.minReductionRatio, options: configured, messages: [], totalMs });
-        await persist($, eventState, { ...base, ...(failure ? { outcome: 'skipped' as const, reasonCode: 'error' as const, reason: eventReason('error') } : {}),
-          contextPercentBefore: before, contextPercentAfter: after ?? before, totalMs,
-          auto: { trigger: auto.trigger, compactions: auto.compactions, ...(auto.disabledReason ? { disabledReason: auto.disabledReason } : {}) } }, 'auto');
-      }
-      compacting = false;
-    }
-    return next(event);
+    const result = await next(event);
+    if (state.compacting || event.agentId) return result;
+    state.auto = { ...state.auto, turnsSinceCompaction: state.auto.turnsSinceCompaction + 1 };
+    state.compacting = true;
+    void autoCompact($, state);
+    return result;
   });
 };
 

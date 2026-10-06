@@ -29,7 +29,7 @@ function validEvent(event) {
   if (!object(event) || event.v !== 1 || !Number.isFinite(Date.parse(event.ts)) ||
       !['sessionId', 'trigger', 'model'].every((key) => typeof event[key] === 'string') ||
       !['jev', 'fallback', 'skipped'].includes(event.outcome) ||
-      !['ok', 'ceiling_below_min', 'reduction_below_min', 'no_api_key', 'jev_error', 'error'].includes(event.reasonCode) ||
+      !['ok', 'ceiling_below_min', 'reduction_below_min', 'no_api_key', 'jev_error', 'error', 'gate_wait'].includes(event.reasonCode) ||
       !['ceilingRatio', 'minReductionRatio', 'messagesBefore', 'charsBefore', 'totalMs'].every((key) => finite(event[key])) ||
       !object(event.thresholds) || !finite(event.thresholds.keepResult) || !finite(event.thresholds.keepCall)) return false;
   if (event.byTool !== undefined && (!object(event.byTool) || !Object.values(event.byTool).every((tool) => object(tool) && actionKeys.every((key) => finite(tool[key]))))) return false;
@@ -68,7 +68,17 @@ export function totals(events) {
   const scores = { keepCall: Array(10).fill(0), keepResult: Array(10).fill(0) };
   const reductions = [];
   const binaryChars = { before: 0, removed: 0 };
+  const gate = { scores: { boundary: Array(10).fill(0), needsRecent: Array(10).fill(0) }, reasons: Object.create(null), medianTail: undefined };
+  const tails = [];
   for (const event of events) {
+    if (event.auto && object(event.gate)) {
+      const decision = event.gate;
+      if (typeof decision.reason === 'string') gate.reasons[decision.reason] = (gate.reasons[decision.reason] ?? 0) + 1;
+      for (const key of ['boundary', 'needsRecent']) {
+        if (finite(decision[key])) gate.scores[key][Math.max(0, Math.min(9, Math.floor(decision[key] * 10)))] += 1;
+      }
+      if (finite(decision.tail)) tails.push(decision.tail);
+    }
     // Auto observations describe the same attempt as the dispatch event.
     if (event.auto) { autoOutcomes[event.outcome] += 1; continue; }
     outcomes[event.outcome] += 1;
@@ -87,7 +97,9 @@ export function totals(events) {
   reductions.sort((a, b) => a - b);
   const n = reductions.length;
   const medianReduction = n ? (reductions[Math.floor((n - 1) / 2)] + reductions[Math.floor(n / 2)]) / 2 : undefined;
-  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores, binaryChars };
+  tails.sort((a, b) => a - b);
+  if (tails.length) gate.medianTail = (tails[Math.floor((tails.length - 1) / 2)] + tails[Math.floor(tails.length / 2)]) / 2;
+  return { outcomes, autoOutcomes, fallbackReasons, medianReduction, byTool, scores, binaryChars, gate };
 }
 
 const percent = (number) => finite(number) ? `${(number * 100).toFixed(1)}%` : '-';
@@ -107,6 +119,8 @@ export function formatReport(events, skipped) {
     `Fallback reasons: ${JSON.stringify(sum.fallbackReasons)}`, `Median Jev reduction: ${percent(sum.medianReduction)}`,
     `Per-tool action totals: ${JSON.stringify(sum.byTool)}`, `Score histograms: ${JSON.stringify(sum.scores)}`,
     `Binary chars: ${JSON.stringify(sum.binaryChars)}`,
+    `Gate score histograms: ${JSON.stringify(sum.gate.scores)}`, `Gate reasons: ${JSON.stringify(sum.gate.reasons)}`,
+    `Median gate tail: ${sum.gate.medianTail ?? '-'}`,
     `Skipped unreadable/invalid entries: ${skipped}`);
   return lines.join('\n');
 }

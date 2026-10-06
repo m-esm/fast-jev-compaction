@@ -1,9 +1,63 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions, with PII masking and auto-compaction guards.",
   "license": "MIT",
   "userConfig": {
+    "gate": {
+      "type": "boolean",
+      "title": "Jev compaction gate",
+      "description": "Ask Jev when to compact and where the verbatim tail begins. Disable to use the numeric trigger.",
+      "default": true
+    },
+    "gateFloorPercent": {
+      "type": "number",
+      "title": "Gate context floor",
+      "description": "Minimum context percentage before asking Jev about compaction timing.",
+      "default": 40
+    },
+    "hardCeilingPercent": {
+      "type": "number",
+      "title": "Hard context ceiling",
+      "description": "Request compaction at this context percentage regardless of Jev scores, after cooldown and session guards pass.",
+      "default": 80
+    },
+    "boundaryThreshold": {
+      "type": "number",
+      "title": "Task boundary threshold",
+      "description": "Minimum probability that work reached a natural boundary before compacting below the hard ceiling.",
+      "default": 0.6
+    },
+    "needsRecentThreshold": {
+      "type": "number",
+      "title": "Recent output threshold",
+      "description": "Maximum probability that the next turn needs recent tool outputs verbatim before compacting below the hard ceiling.",
+      "default": 0.4
+    },
+    "cutConfidence": {
+      "type": "number",
+      "title": "Task start confidence",
+      "description": "Minimum confidence in Jev's task start choice to adjust the pinned tail.",
+      "default": 0.5
+    },
+    "gateWindowMessages": {
+      "type": "number",
+      "title": "Gate conversation window",
+      "description": "Newest messages shown to the gate, alongside the first message and recent user goals. Maximum 253 for choice capacity.",
+      "default": 24
+    },
+    "gateMaxTail": {
+      "type": "number",
+      "title": "Maximum gate tail",
+      "description": "Maximum number of newest messages pinned by the gate. Never less than preserveRecentMessages.",
+      "default": 40
+    },
+    "gateMaxStateTokens": {
+      "type": "number",
+      "title": "Maximum gate state tokens",
+      "description": "Estimated token budget for gate state. Oldest window messages are dropped first if needed.",
+      "default": 8000
+    },
     "events": {
       "type": "boolean",
       "title": "Persist compaction events",
@@ -75,7 +129,7 @@
     "compactAtPercent": {
       "type": "number",
       "title": "Compaction percentage",
-      "description": "Context percentage at which turn.complete requests compaction.",
+      "description": "Numeric context trigger when the gate is disabled or Jev is unavailable.",
       "default": 60
     },
     "minReductionRatio": {

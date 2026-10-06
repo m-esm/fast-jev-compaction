@@ -213,8 +213,8 @@ asked again, and every attempt costs a full round of Jev requests.
 Four guards, all in the hook:
 
 - a **pre-flight**: `droppableRatio()` computes locally the best reduction this
-  transcript could reach; under `minReductionRatio`, the hook falls back to the
-  built-in summary without calling Jev at all;
+  transcript could reach; under `minReductionRatio`, plugin requests skip and
+  user or engine requests use the built-in summary without a pruning request;
 - a **cooldown** of `cooldownTurns` turns after each compaction;
 - an **escalating trigger**: a compaction that frees less than `minPercentDrop`
   context points raises the trigger above where the context now sits, so the
@@ -264,29 +264,57 @@ summary. It falls back to the built-in summary when Jev fails or the key is
 missing, when the local pre-flight says no run could reach `minReductionRatio`,
 and when a real run does not reach it either.
 
-**It asks for compactions of its own** (`turn.complete`), at the end of a turn,
-when all of these hold:
+**It asks for compactions of its own** (`turn.complete`). The gate is on by
+default. Once context reaches `gateFloorPercent` (40), the cooldown of three
+turns, the cap of eight attempts and the session guards permit one Jev request.
+Below the floor there is no request. The request asks three independent questions:
 
-| Condition | Default |
-| --- | --- |
-| context at or above `compactAtPercent` | 60% |
-| turns since the last compaction | 3 (`cooldownTurns`) |
-| compactions so far this session | under 8 (`maxAutoCompactions`) |
-| auto-compaction not disabled by the guards | |
+- Did the latest assistant message finish a unit of work, or did the user switch tasks?
+- Will the next turn need recent tool outputs verbatim?
+- Which recent user prompt began the task currently in progress?
 
-That 60% is more eager than the built-in auto-compaction, which waits for the
-context to fill. It is meant to be: compacting costs nothing here, since
-messages stay verbatim and only tool results go, so early and often beats late
-and brutal.
+Compaction proceeds when the boundary probability is at least
+`boundaryThreshold` (0.6) and the recent-output probability is at most
+`needsRecentThreshold` (0.4). At `hardCeilingPercent` (80), it proceeds regardless
+of those scores once the cheap guards pass. Missing credentials, failed requests
+and invalid responses fall back to the numeric `compactAtPercent` trigger (60).
+The hard ceiling still applies when Jev is unavailable. Set `gate: false` to
+restore numeric timing and the default tail.
 
-The trigger is not fixed. A compaction that frees less than `minPercentDrop`
-(5) points raises it above the level it could not bring down: 82% to 80% moves
-the trigger from 60% to 85%, so the next attempt waits for real growth instead
-of firing on the next turn. If that pushes the trigger to 95%, auto-compaction
-turns itself off for the session and says so.
+The state contains the first message, the newest `gateWindowMessages` (24),
+the last user goals and context percentage. It uses the same redaction and
+gitleaks scan as pruning, masks before truncation, omits tool output bodies,
+truncates inputs and abridges long text. It drops oldest window messages first
+to fit `gateMaxStateTokens` (8000); an impossible budget uses numeric fallback.
+The window is capped at 253 messages to stay within Jev's choice limit.
 
-The two mechanisms chain: `turn.complete` calls `$.session.compact()`, which
-fires the `session.compact` hook. A re-entrance flag keeps that from looping.
+A task-start choice with confidence at least `cutConfidence` (0.5) pins all
+messages from that prompt onward. The tail is clamped between
+`preserveRecentMessages` (6) and `gateMaxTail` (40). A confident `all_done`
+choice uses the default tail; `none` or low confidence leaves it unchanged.
+Messages appended while the command waits are added to the chosen tail, with
+the same clamp. These gate defaults are **untuned placeholders**, collected in
+`GATE_DEFAULTS`; use logged scores and real sessions before tuning them.
+
+A compaction that frees less than `minPercentDrop` (5) points raises the
+trigger above the resulting context level: 82% to 80% raises it to 85%.
+At 95% it disables further plugin attempts for the session. Waiting on Jev's
+verdict does not spend the cap or reset cooldown.
+
+The auto path calls `$.command.run({ command: 'compact' })` after `next(event)`
+in an asynchronous continuation, so the turn hook returns immediately. A probe
+on Claude Code 2.1.283 found that the session compaction API throws in headless
+and SDK sessions, including Claude Desktop. Submitting `/compact` as prompt
+text is also refused by the host. Running the bare `compact` command works in
+SDK and interactive sessions: it queues the command until idle and fires
+`session.compact` with a `manual` trigger. Session messages and usage are
+available at turn completion, and the hook engine remains usable after return.
+
+The pending gate request identifies that queued manual dispatch as plugin
+work. It uses the chosen tail, logs without a toast, and skips instead of
+invoking the built-in summary if pruning cannot help. A user-typed `/compact`
+without a pending request retains normal manual behavior. A re-entrance flag
+prevents overlapping gate requests and command loops.
 
 ### Install in Claude Code
 
@@ -325,12 +353,21 @@ engine-triggered compactions still fall back to the built-in summary.
 Precompute writes diagnostics without a toast. Installed compactions reset
 the cooldown. Removed calls leave an explicit marker beside the narration.
 
-Version 0.5.0 writes one JSON file per `session.compact` dispatch, including
+The plugin writes one JSON file per `session.compact` dispatch, including
 precompute, to `~/.claude/cache/fast-jev-compaction/events`. Set the plugin
 option `eventsDir` to change the directory or `events: false` to disable it.
 Files are named `<UTC timestamp>-<session8>-<trigger>.json`. A separate
 `-auto.json` observation records the before/after context percentage and
-trigger escalation for each plugin auto-compaction attempt.
+trigger escalation for each evaluated turn end, including wait decisions
+(`outcome: skipped`, `reasonCode: gate_wait`). Turns rejected by the cheap guards
+are not evaluated. Queued plugin compactions retain the `plugin` event suffix.
+
+The optional `gate` block contains `boundary`, `needsRecent`, `taskStart`
+(`choice` and `confidence`), chosen `tail`, `reason`, resolved `model` and `ms`.
+Unavailable scores and default tails are omitted. Its values contain numbers
+and codes only, never prompt snippets or paths. Older events without this block
+remain readable. Gate requests are not retried, preserving one request per
+evaluated turn; pruning requests retain their existing retry behavior.
 
 Events contain outcome and reason codes, thresholds, character/message counts,
 per-tool actions, score deciles, request/retry counts and timings. They never
@@ -344,16 +381,24 @@ node scripts/report.mjs --last 20
 node scripts/report.mjs --dir tests/fixtures/events --session 1234 --json
 npx tsx scripts/replay.ts tests/fixtures/transcript.jsonl
 npx tsx scripts/replay.ts /path/to/transcript.jsonl --until-boundary 2
+npx tsx scripts/replay.ts tests/fixtures/transcript.jsonl --gate --percent 65
 ```
 
 Report supports `--days N` and skips unreadable or invalid event files. It
 prints dispatch totals, median Jev reduction, per-tool actions and score
 histograms; auto observations are counted separately to avoid duplication.
+Gate reporting adds boundary and recent-output deciles, counts by gate reason
+and median chosen tail, counted from auto observations once per decision.
 Replay is offline by default, reports only counts and a pre-check verdict, and
 uses the default plugin thresholds and newest-message pinning. It stops before
 the first compaction boundary unless `--until-boundary N` selects another.
 `--ask` explicitly opts into a real Jev request using `TYPESAFE_API_KEY` from
-the environment; it prints the result summary and aggregates. The `report`
+the environment; it prints the result summary and aggregates. `--gate` walks
+completed user turns across the transcript and prints one verdict per turn end.
+`--percent N` simulates context usage (default 60). Offline it reports
+`below_floor` or the numeric fallback with `jev_unavailable`; `--gate --ask`
+adds live scores, reason and chosen tail. An explicit `--until-boundary N`
+still limits gate replay. The `report`
 and `replay` npm scripts expose the same commands.
 
 ## Development

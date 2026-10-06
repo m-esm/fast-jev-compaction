@@ -11,7 +11,7 @@ import {
   summarize,
   toSessionMessages,
 } from '../hooks/fast-jev.ts';
-import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
+import { GATE_DEFAULTS, applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
 
@@ -58,7 +58,7 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 function fakeEngine(options: Record<string, unknown> = {}) {
   const handlers: Record<string, (...args: any[]) => Promise<any>> = {};
   register(((name: string, handler: any) => { handlers[name] = handler; }) as any, {
-    apiKey: 'fake', gitleaks: false, preserveRecentMessages: 1, ...options,
+    apiKey: 'fake', gate: false, gitleaks: false, preserveRecentMessages: 1, ...options,
   });
   const $ = {
     env: { get: vi.fn(async (name: string) => name === 'HOME' ? '/fake-home' : undefined) },
@@ -67,16 +67,143 @@ function fakeEngine(options: Record<string, unknown> = {}) {
     fs: { write: vi.fn(async () => {}) },
     http: { fetch: vi.fn(jevFetch(() => 0)) },
     ui: { log: vi.fn(), toast: vi.fn() },
+    command: { run: vi.fn(async (_input: { command: string }): Promise<unknown> => ({})) },
     session: {
       id: vi.fn(async () => '12345678-session'),
       usage: vi.fn(async () => ({ context: { percent: 80 } })),
+      messages: vi.fn(async () => transcript()),
       compact: vi.fn(async () => ({ messages: [] })),
     },
   };
   const next = vi.fn(async () => ({ messages: [] }));
+  const turnNext = vi.fn(async () => ({ text: 'completed' }));
+  const turnNow = () => handlers['turn.complete']!($, {}, turnNext);
   return { $, next, dispatch: (trigger: string, messages = transcript()) => handlers['session.compact']!($, { trigger, messages }, next),
-    turn: () => handlers['turn.complete']!($, {}, vi.fn(async () => ({}))) };
+    turnNext, turnNow, turn: async () => { const result = await turnNow(); await new Promise(setImmediate); return result; } };
 }
+
+function gateFetch(boundary = 0.9, needsRecent = 0.1, choice = 'all_done', confidence = 0.9) {
+  return async (url: string, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}');
+    if (!body.questions.boundary) return jevFetch(() => 0)(url, init);
+    return { status: 200, ok: true, text: JSON.stringify({ model: 'jev-test', answers: {
+      boundary: { noul: boundary }, needsRecent: { noul: needsRecent }, taskStart: { choice, confidence, probabilities: {} },
+    } }) };
+  };
+}
+
+function autoEvents(engine: ReturnType<typeof fakeEngine>) {
+  return (engine.$.fs.write.mock.calls as unknown as [string, string][]).filter(([path]) => path.endsWith('-auto.json')).map(([, body]) => JSON.parse(body));
+}
+
+describe('registered gate', () => {
+  it('returns next immediately, asks once, and queues the bare compact command', async () => {
+    const engine = fakeEngine({ gate: true });
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 65 } });
+    let release!: (value: { status: number; ok: boolean; text: string }) => void;
+    engine.$.http.fetch.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    expect(await engine.turn()).toEqual({ text: 'completed' });
+    expect(engine.turnNext).toHaveBeenCalledTimes(1);
+    expect(engine.$.http.fetch).toHaveBeenCalledTimes(1);
+    expect(engine.$.command.run).not.toHaveBeenCalled();
+    await engine.turn();
+    expect(engine.$.http.fetch).toHaveBeenCalledTimes(1);
+    release(await gateFetch()('', { body: JSON.stringify({ questions: { boundary: {} } }) }));
+    await new Promise(setImmediate);
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
+    expect(engine.$.command.run).toHaveBeenCalledWith({ command: 'compact' });
+    expect(engine.$.session.compact).not.toHaveBeenCalled();
+    expect(autoEvents(engine)[0].gate).toMatchObject({ boundary: 0.9, needsRecent: 0.1, reason: 'boundary', tail: 1, model: 'jev-test' });
+  });
+
+  it('pins the chosen task plus messages added while queued and consumes the pending request once', async () => {
+    const engine = fakeEngine({ gate: true, minReductionRatio: 0 });
+    engine.$.http.fetch.mockImplementation(gateFetch(0.9, 0.1, 'u2'));
+    const messages = transcript();
+    messages.splice(3, 0, message('user', 'Start the second task.'));
+    engine.$.session.messages.mockResolvedValue(messages);
+    let release!: () => void;
+    engine.$.command.run.mockImplementation(() => new Promise((resolve) => { release = () => resolve({}); }));
+    await engine.turn();
+    const grown = [...messages, message('assistant', 'Queued result.'), message('user', '/compact')];
+    await engine.dispatch('manual', grown);
+    const writes = engine.$.fs.write.mock.calls as unknown as [string, string][];
+    const queued = JSON.parse(writes.at(-1)![1]);
+    expect(queued).toMatchObject({ trigger: 'plugin', outcome: 'jev', stats: { pinned: 1 }, gate: { tail: 5 } });
+    expect(engine.next).not.toHaveBeenCalled();
+    expect(engine.$.ui.toast).not.toHaveBeenCalled();
+    await engine.dispatch('manual', grown);
+    const manual = JSON.parse(writes.at(-1)![1]);
+    expect(manual.stats.pinned).toBe(0);
+    expect(manual.trigger).toBe('manual');
+    expect(manual.gate).toBeUndefined();
+    release();
+    await new Promise(setImmediate);
+  });
+
+  it('keeps user manual fallback and suppresses built-in fallback for a queued request', async () => {
+    const engine = fakeEngine({ gate: true });
+    engine.$.http.fetch.mockImplementation(gateFetch());
+    engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', [message('user', 'Nothing to prune.')]));
+    await engine.turn();
+    expect(engine.next).not.toHaveBeenCalled();
+    expect(autoEvents(engine)[0]).toMatchObject({ outcome: 'skipped', reasonCode: 'ceiling_below_min' });
+    await engine.dispatch('manual', [message('user', 'Nothing to prune.')]);
+    expect(engine.next).toHaveBeenCalledTimes(1);
+    expect(engine.$.ui.toast).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([['failure', 65, 1], ['failure', 50, 0], ['missing', 65, 1], ['missing', 50, 0]])('uses numeric fallback on %s at %s percent', async (kind, percent, commands) => {
+    const engine = fakeEngine({ gate: true, ...(kind === 'missing' ? { apiKey: '' } : {}) });
+    engine.$.session.usage.mockResolvedValue({ context: { percent: percent as number } });
+    engine.$.http.fetch.mockRejectedValue(new Error('PRIVATE_SENTINEL'));
+    await engine.turn();
+    expect(engine.$.command.run).toHaveBeenCalledTimes(commands as number);
+    expect(engine.$.http.fetch).toHaveBeenCalledTimes(kind === 'missing' ? 0 : 1);
+    expect(autoEvents(engine)[0].gate.reason).toBe('jev_unavailable');
+    expect(JSON.stringify(engine.$.fs.write.mock.calls)).not.toContain('PRIVATE_SENTINEL');
+  });
+
+  it('does not fetch or read messages below the floor', async () => {
+    const engine = fakeEngine({ gate: true });
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 39 } });
+    await engine.turn();
+    expect(engine.$.http.fetch).not.toHaveBeenCalled();
+    expect(engine.$.session.messages).not.toHaveBeenCalled();
+    expect(engine.$.command.run).not.toHaveBeenCalled();
+  });
+
+  it('writes a content-free wait observation for each evaluated turn without spending the cap', async () => {
+    const engine = fakeEngine({ gate: true, maxAutoCompactions: 1 });
+    engine.$.session.usage.mockResolvedValue({ context: { percent: 65 } });
+    engine.$.http.fetch.mockImplementation(gateFetch(0.2, 0.8, 'u1'));
+    await engine.turn();
+    await engine.turn();
+    expect(engine.$.http.fetch).toHaveBeenCalledTimes(2);
+    expect(engine.$.command.run).not.toHaveBeenCalled();
+    const events = autoEvents(engine);
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event).toMatchObject({ outcome: 'skipped', reasonCode: 'gate_wait', gate: { boundary: 0.2, needsRecent: 0.8, reason: 'needs_recent' }, auto: { compactions: 0 } });
+      const serialized = JSON.stringify(event.gate);
+      for (const message of transcript().filter((message) => message.text)) expect(serialized).not.toContain(message.text);
+      expect(serialized).not.toContain('src/a.ts');
+      expect(serialized).not.toContain('FAIL');
+    }
+  });
+
+  it('overrides a wait at the hard ceiling, records command failure, and clears pending state', async () => {
+    const engine = fakeEngine({ gate: true });
+    engine.$.http.fetch.mockImplementation(gateFetch(0, 1));
+    engine.$.command.run.mockRejectedValue(new Error('PRIVATE_SENTINEL'));
+    await engine.turn();
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
+    expect(autoEvents(engine)[0]).toMatchObject({ outcome: 'skipped', reasonCode: 'error', gate: { reason: 'hard_ceiling' }, auto: { compactions: 1 } });
+    await engine.dispatch('manual', [message('user', 'no tools')]);
+    expect(engine.next).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(engine.$.fs.write.mock.calls)).not.toContain('PRIVATE_SENTINEL');
+  });
+});
 
 describe('registered hook cooldown', () => {
   it.each(['manual', 'auto', 'plugin'])('resets after %s returns Jev messages', async (trigger) => {
@@ -84,23 +211,23 @@ describe('registered hook cooldown', () => {
     await engine.dispatch(trigger);
     await engine.turn();
     await engine.turn();
-    expect(engine.$.session.compact).not.toHaveBeenCalled();
+    expect(engine.$.command.run).not.toHaveBeenCalled();
     await engine.turn();
-    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
   });
 
   it.each(['manual', 'auto'])('resets after %s built-in fallback returns messages', async (trigger) => {
     const engine = fakeEngine();
     await engine.dispatch(trigger, [message('user', 'nothing to prune')]);
     await engine.turn();
-    expect(engine.$.session.compact).not.toHaveBeenCalled();
+    expect(engine.$.command.run).not.toHaveBeenCalled();
   });
 
   it('does not reset for precompute', async () => {
     const engine = fakeEngine();
     await engine.dispatch('precompute');
     await engine.turn();
-    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -123,10 +250,10 @@ describe('registered fallback triggers', () => {
 
   it('feeds skipped plugin compactions into cooldown and trigger escalation', async () => {
     const engine = fakeEngine({ cooldownTurns: 0 });
-    engine.$.session.compact.mockImplementation(async () => engine.dispatch('plugin', [message('user', 'text')]));
+    engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', [message('user', 'text')]));
     await engine.turn();
     await engine.turn();
-    expect(engine.$.session.compact).toHaveBeenCalledTimes(1);
+    expect(engine.$.command.run).toHaveBeenCalledTimes(1);
     expect(engine.$.ui.log.mock.calls.flat().join(' ')).toContain('trigger raised to 85%');
   });
 });
@@ -206,7 +333,7 @@ describe('persisted hook events', () => {
 
   it('writes an additional auto event with skip and escalation state', async () => {
     const engine = fakeEngine();
-    engine.$.session.compact.mockImplementation(async () => engine.dispatch('plugin', [message('user', 'text')]));
+    engine.$.command.run.mockImplementation(async () => engine.dispatch('manual', [message('user', 'text')]));
     await engine.turn();
     const writes = engine.$.fs.write.mock.calls as unknown as [string, string][];
     expect(writes).toHaveLength(2);
@@ -234,6 +361,7 @@ describe('persisted hook events', () => {
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
     expect(resolveHookConfig({})).toEqual({
+      ...GATE_DEFAULTS,
       gitleaks: true,
       events: true,
       compactAtPercent: 60,
@@ -256,6 +384,7 @@ describe('hook config', () => {
         protectErrors: false,
       }),
     ).toEqual({
+      ...GATE_DEFAULTS,
       apiKey: 'k',
       gitleaks: true,
       events: true,

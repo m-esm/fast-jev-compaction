@@ -57,6 +57,15 @@ The plugin declares these `userConfig` values in
 | `protectErrors` | `true` |
 | `sideEffectTools` | built-in list |
 | `preserveRecentMessages` | `6` |
+| `gate` | `true` |
+| `gateFloorPercent` | `40` |
+| `hardCeilingPercent` | `80` |
+| `boundaryThreshold` | `0.6` |
+| `needsRecentThreshold` | `0.4` |
+| `cutConfidence` | `0.5` |
+| `gateWindowMessages` | `24` |
+| `gateMaxTail` | `40` |
+| `gateMaxStateTokens` | `8000` |
 | `compactAtPercent` | `60` |
 | `minReductionRatio` | `0.25` |
 | `cooldownTurns` | `3` |
@@ -83,18 +92,23 @@ The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
-`model` is passed straight to the library; see the root README for what they
-do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
+The gate options control timing and the per-run verbatim tail.
+`compactAtPercent` is the numeric fallback when `gate` is false or Jev is
+unavailable. Gate thresholds are untuned placeholders. See the root README's
+[When it runs](../README.md#when-it-runs) section for the decision rules.
+The `session.compact` hook runs the pruning requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below
 `minReductionRatio`, the hook logs a fallback and delegates to Claude Code's
 built-in compaction. The outcome is shown as a toast and logged with the
 reduction, per-reason counts, state size and request count; a per-call
 `decisions:` line with both probabilities is logged for diagnosis. The
-`turn.complete` hook requests
-compaction when `context.percent` reaches `compactAtPercent`, with an
-in-flight guard.
+`turn.complete` hook returns `next`'s result, then evaluates the gate in an
+asynchronous continuation. It calls `$.command.run({ command: 'compact' })`
+when the gate permits compaction. This works in SDK sessions, where the session
+compaction API is unavailable. A pending request carries the chosen tail into
+the queued manual dispatch; added messages extend that tail up to `gateMaxTail`.
+The in-flight guard covers both the Jev request and the queued command.
 
 ## Compaction triggers and diagnostics
 
@@ -102,7 +116,7 @@ in-flight guard.
 | --- | --- | --- | --- |
 | `manual` | Install pruned messages | Delegate to the built-in summary | Yes |
 | `auto` (engine) | Install pruned messages | Delegate to the built-in summary | Yes |
-| `plugin` | Install pruned messages | Return `{ skip }`, keep the transcript | Yes |
+| `plugin` (including queued manual dispatch) | Install pruned messages | Return `{ skip }`, keep the transcript | No |
 | `precompute` | Return candidate messages for later | Delegate to built-in precomputation | No |
 
 The fallback rules cover insufficient removable context, insufficient actual
@@ -119,6 +133,10 @@ that marker contributes to the resulting character count.
 With `events` enabled, each dispatch writes a separate content-free JSON file,
 including silent precompute and skipped attempts. Auto-compaction also writes
 an `-auto.json` observation with context percentages and the trigger/cap state.
+Every evaluated gate decision writes this observation, including waits, with
+content-free scores, task-start choice, tail, reason, model and timing in `gate`.
+Gate waits use `gate_wait` and do not spend the cap. Gate requests have no retry;
+the retry policy above applies to pruning requests.
 Writes use the engine filesystem, which creates missing parent directories.
 Write failures log one diagnostic line and do not interrupt compaction.
 See the root [Observability](../README.md#observability) section for the event

@@ -6,8 +6,9 @@ import { JevClient } from '../src/client.js';
 import { buildCompactionEvent } from '../src/events.js';
 import { collectToolCalls } from '../src/state.js';
 import { binaryPayloadChars } from '../src/payload.js';
-import { resolveHookConfig, summarize } from '../hooks/fast-jev.js';
+import { jevAsker, resolveHookConfig, summarize } from '../hooks/fast-jev.js';
 import type { Message } from '../src/types.js';
+import { evaluateGate } from '../src/gate.js';
 
 type Block = Record<string, unknown>;
 const object = (value: unknown): value is Block => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -109,10 +110,17 @@ export function formatReplay(parsed: ReturnType<typeof parseTranscript>): string
 export function parseArgs(args: string[]) {
   let path: string | undefined;
   let ask = false;
+  let gate = false;
+  let percent = 60;
   let untilBoundary = 1;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i]!;
     if (arg === '--ask') ask = true;
+    else if (arg === '--gate') gate = true;
+    else if (arg === '--percent') {
+      percent = Number(args[++i]);
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) throw new Error('Percent must be between 0 and 100');
+    }
     else if (arg === '--until-boundary') {
       untilBoundary = Number(args[++i]);
       if (!Number.isInteger(untilBoundary) || untilBoundary < 1) throw new Error('Boundary must be a positive integer');
@@ -120,12 +128,38 @@ export function parseArgs(args: string[]) {
     else throw new Error('Unexpected argument');
   }
   if (!path) throw new Error('Transcript required');
-  return { path, ask, untilBoundary };
+  return { path, ask, gate, percent, untilBoundary: gate && !args.includes('--until-boundary') ? Number.MAX_SAFE_INTEGER : untilBoundary };
+}
+
+export function turnEnds(messages: readonly Message[]): number[] {
+  const ends: number[] = [];
+  let start = 0;
+  for (let i = 0; i <= messages.length; i += 1) {
+    const message = messages[i];
+    if (i === messages.length || (message?.role === 'user' && message.text.trim() && !message.toolResults?.length)) {
+      if (messages.slice(start, i).some((entry) => entry.role === 'assistant')) ends.push(i);
+      start = i;
+    }
+  }
+  return ends;
 }
 
 export async function main(args = process.argv.slice(2), print: (text: string) => void = console.log) {
   const options = parseArgs(args);
   const parsed = parseTranscript(await readFile(options.path, 'utf8'), options.untilBoundary);
+  if (options.gate) {
+    const config = resolveHookConfig({});
+    const apiKey = options.ask ? process.env.TYPESAFE_API_KEY : undefined;
+    const client = apiKey ? jevAsker(async (url, init) => {
+      const response = await fetch(url, init);
+      return { status: response.status, ok: response.ok, text: await response.text() };
+    }, apiKey, config.model) : undefined;
+    for (const [index, end] of turnEnds(parsed.messages).entries()) {
+      const verdict = await evaluateGate(parsed.messages.slice(0, end), options.percent, config, client);
+      print(`Turn ${index + 1}: ${verdict.reason}; compact=${verdict.compact}; tail=${verdict.tail ?? 'default'}; scores=${JSON.stringify(verdict.scores)}${options.ask ? '' : '; offline numeric fallback'}`);
+    }
+    return;
+  }
   print(formatReplay(parsed));
   if (!options.ask) return;
   const apiKey = process.env.TYPESAFE_API_KEY;
@@ -146,7 +180,7 @@ export async function main(args = process.argv.slice(2), print: (text: string) =
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(() => {
-    console.error('Replay failed. Check the transcript, arguments, and API configuration if using --ask. Usage: tsx scripts/replay.ts TRANSCRIPT [--until-boundary N] [--ask]');
+    console.error('Replay failed. Check the transcript, arguments, and API configuration if using --ask. Usage: tsx scripts/replay.ts TRANSCRIPT [--until-boundary N] [--ask] [--gate] [--percent N]');
     process.exitCode = 1;
   });
 }
